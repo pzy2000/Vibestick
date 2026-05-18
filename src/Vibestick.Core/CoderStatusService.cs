@@ -118,7 +118,8 @@ public sealed class JsonFileCoderStatusSource : ICoderStatusSource
             Workspace = string.IsNullOrWhiteSpace(status.Workspace) ? null : status.Workspace.Trim(),
             SessionId = string.IsNullOrWhiteSpace(status.SessionId) ? null : status.SessionId.Trim(),
             TaskSummary = string.IsNullOrWhiteSpace(status.TaskSummary) ? null : status.TaskSummary.Trim(),
-            SourcePath = string.IsNullOrWhiteSpace(status.SourcePath) ? null : status.SourcePath.Trim()
+            SourcePath = string.IsNullOrWhiteSpace(status.SourcePath) ? null : status.SourcePath.Trim(),
+            TaskDetail = string.IsNullOrWhiteSpace(status.TaskDetail) ? null : status.TaskDetail.Trim()
         };
     }
 }
@@ -151,6 +152,7 @@ public sealed class CoderStatusWriter
         string? sessionId = null,
         string? taskSummary = null,
         string? sourcePath = null,
+        string? taskDetail = null,
         DateTimeOffset? now = null,
         CancellationToken cancellationToken = default)
     {
@@ -164,7 +166,8 @@ public sealed class CoderStatusWriter
             ttlSeconds,
             string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim(),
             string.IsNullOrWhiteSpace(taskSummary) ? null : taskSummary.Trim(),
-            string.IsNullOrWhiteSpace(sourcePath) ? null : sourcePath.Trim());
+            string.IsNullOrWhiteSpace(sourcePath) ? null : sourcePath.Trim(),
+            string.IsNullOrWhiteSpace(taskDetail) ? null : taskDetail.Trim());
 
         Directory.CreateDirectory(_directory);
         var path = CoderStatusPaths.GetStatusPath(_directory, status.Agent, status.SessionId);

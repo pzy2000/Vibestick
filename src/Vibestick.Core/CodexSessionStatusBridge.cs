@@ -23,7 +23,10 @@ public sealed record CodexSessionMetadata(
 
 public static class CodexSessionEventMapper
 {
-    private const int MaxTaskSummaryLength = 96;
+    private const int MaxTaskSummaryLength = 48;
+    private const int MaxTaskDetailLength = 118;
+    private static readonly RegexOptions CleanupOptions =
+        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant;
 
     public static bool TryMapJsonLine(string line, out CodexSessionStatusUpdate update)
     {
@@ -157,6 +160,66 @@ public static class CodexSessionEventMapper
         return false;
     }
 
+    public static bool TryReadTaskDetail(string line, out string detail)
+    {
+        detail = string.Empty;
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (!TryGetString(root, "type", out var type) ||
+                !root.TryGetProperty("payload", out var payload))
+            {
+                return false;
+            }
+
+            if (string.Equals(type, "event_msg", StringComparison.OrdinalIgnoreCase) &&
+                TryGetString(payload, "type", out var eventType) &&
+                string.Equals(eventType, "agent_message", StringComparison.OrdinalIgnoreCase) &&
+                TryGetString(payload, "message", out var eventMessage))
+            {
+                return TryNormalizeTaskDetail(eventMessage, out detail);
+            }
+
+            if (!string.Equals(type, "response_item", StringComparison.OrdinalIgnoreCase) ||
+                !TryGetString(payload, "type", out var itemType) ||
+                !string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase) ||
+                !TryGetString(payload, "role", out var role) ||
+                !string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ||
+                !payload.TryGetProperty("content", out var content) ||
+                content.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            foreach (var contentItem in content.EnumerateArray())
+            {
+                if (contentItem.ValueKind != JsonValueKind.Object ||
+                    !TryGetString(contentItem, "type", out var contentType) ||
+                    contentType is not "output_text" and not "text" ||
+                    !TryGetString(contentItem, "text", out var text))
+                {
+                    continue;
+                }
+
+                if (TryNormalizeTaskDetail(text, out detail))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return false;
+    }
+
     public static bool TryReadTimestamp(string line, out DateTimeOffset timestamp)
     {
         timestamp = default;
@@ -186,27 +249,162 @@ public static class CodexSessionEventMapper
             return false;
         }
 
-        var cleaned = Regex.Replace(
-            value,
-            "<environment_context>.*?</environment_context>",
-            string.Empty,
-            RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        cleaned = Regex.Replace(
-            cleaned,
-            "<image>.*?</image>",
-            string.Empty,
-            RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        cleaned = Regex.Replace(cleaned, @"!\[[^\]]*\]\([^)]+\)", string.Empty);
-        cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+        var cleaned = CleanCodexDisplayText(value);
         if (cleaned.Length == 0)
         {
             return false;
         }
 
-        summary = cleaned.Length <= MaxTaskSummaryLength
-            ? cleaned
-            : $"{cleaned[..(MaxTaskSummaryLength - 3)]}...";
+        var researchName = Regex.Match(
+            cleaned,
+            @"(?:^|\s)#+\s*Task\s+Research\s+name:\s*(?<name>.+?)\s+category:",
+            CleanupOptions);
+        if (researchName.Success)
+        {
+            cleaned = researchName.Groups["name"].Value.Trim();
+        }
+
+        cleaned = BuildShortTaskSummary(cleaned);
+        summary = Truncate(cleaned, MaxTaskSummaryLength);
         return true;
+    }
+
+    public static bool TryNormalizeTaskDetail(string value, out string detail)
+    {
+        detail = string.Empty;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var cleaned = CleanCodexDisplayText(value);
+        if (cleaned.Length == 0)
+        {
+            return false;
+        }
+
+        detail = Truncate(cleaned, MaxTaskDetailLength);
+        return true;
+    }
+
+    private static string CleanCodexDisplayText(string value)
+    {
+        var cleaned = Regex.Replace(
+            value,
+            "<environment_context>.*?</environment_context>",
+            " ",
+            CleanupOptions);
+        cleaned = Regex.Replace(
+            cleaned,
+            "<image>.*?</image>",
+            " ",
+            CleanupOptions);
+        cleaned = Regex.Replace(
+            cleaned,
+            "<oai-mem-citation>.*?</oai-mem-citation>",
+            " ",
+            CleanupOptions);
+        cleaned = Regex.Replace(cleaned, @"!\[[^\]]*\]\([^)]+\)", " ", CleanupOptions);
+        cleaned = Regex.Replace(cleaned, @"\[\$[^\]]+\]\([^)]+\)", " ", CleanupOptions);
+        cleaned = Regex.Replace(cleaned, @"\[([^\]]+)\]\([^)]+\)", "$1", CleanupOptions);
+        cleaned = Regex.Replace(cleaned, @"`[^`]*[\\/][^`]*`", " ", CleanupOptions);
+        cleaned = Regex.Replace(cleaned, @"[A-Za-z]:\\[^\s\]\)>""']+", " ", CleanupOptions);
+        cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+        return NormalizeKnownTerms(cleaned);
+    }
+
+    private static string BuildShortTaskSummary(string cleaned)
+    {
+        cleaned = StripRequestPrefix(cleaned);
+        if (cleaned.Length == 0)
+        {
+            return cleaned;
+        }
+
+        if (ContainsHan(cleaned))
+        {
+            if (ContainsAny(cleaned, "\u8c03\u7814", "\u7814\u7a76") &&
+                Regex.IsMatch(cleaned, "LLM", CleanupOptions) &&
+                Regex.IsMatch(cleaned, "Router", CleanupOptions))
+            {
+                return "\u8c03\u7814 LLM Router \u65b9\u6848";
+            }
+
+            if ((Regex.IsMatch(cleaned, "pet", CleanupOptions) || cleaned.Contains("\u5ba0\u7269", StringComparison.Ordinal)) &&
+                (Regex.IsMatch(cleaned, "summary", CleanupOptions) || cleaned.Contains("\u6458\u8981\u683c\u5f0f", StringComparison.Ordinal)))
+            {
+                return "\u8c03\u6574 pet \u6458\u8981\u683c\u5f0f";
+            }
+
+            var clause = cleaned.Split(
+                    new[] { '\uFF0C', '\u3002', '\uFF01', '\uFF1F', '!', '?', '\uFF1B', ';', '\uFF1A', ':' },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(static part => part.Trim())
+                .FirstOrDefault(static part => part.Length > 0) ?? cleaned;
+            return StripRequestPrefix(clause);
+        }
+
+        return cleaned;
+    }
+
+    private static string StripRequestPrefix(string value)
+    {
+        var cleaned = value.Trim();
+        foreach (var prefix in new[]
+                 {
+                     "please implement this plan:",
+                     "please ",
+                     "can you ",
+                     "could you ",
+                     "help me ",
+                     "\u8bf7\u5e2e\u6211",
+                     "\u8bf7\u4f60\u5e2e\u6211",
+                     "\u5e2e\u6211",
+                     "\u9ebb\u70e6\u5e2e\u6211",
+                     "\u9ebb\u70e6\u4f60",
+                     "\u8bf7",
+                     "\u6211\u60f3",
+                     "\u6211\u73b0\u5728\u5e0c\u671b",
+                     "\u73b0\u5728\u6211\u5e0c\u671b",
+                     "\u73b0\u5728\u5e0c\u671b",
+                     "\u5e0c\u671b"
+                 })
+        {
+            if (cleaned.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                cleaned = cleaned[prefix.Length..].Trim();
+                break;
+            }
+        }
+
+        return cleaned.Trim(' ', '\t', '\r', '\n', '\uFF0C', '\u3002', ':', '\uFF1A', '-', '\'', '"');
+    }
+
+    private static string NormalizeKnownTerms(string value)
+    {
+        var normalized = Regex.Replace(value, "llm", "LLM", CleanupOptions);
+        normalized = Regex.Replace(normalized, "router", "Router", CleanupOptions);
+        normalized = Regex.Replace(normalized, "cursor", "Cursor", CleanupOptions);
+        normalized = Regex.Replace(normalized, "qwen", "Qwen", CleanupOptions);
+        return normalized;
+    }
+
+    private static string Truncate(string value, int maxLength)
+    {
+        var cleaned = value.Trim();
+        return cleaned.Length <= maxLength
+            ? cleaned
+            : $"{cleaned[..(maxLength - 3)]}...";
+    }
+
+    private static bool ContainsHan(string value)
+    {
+        return value.Any(static character => character is >= '\u4e00' and <= '\u9fff');
+    }
+
+    private static bool ContainsAny(string value, params string[] tokens)
+    {
+        return tokens.Any(token => value.Contains(token, StringComparison.Ordinal));
     }
 
     private static bool TryMapEventMessage(JsonElement payload, out CodexSessionStatusUpdate update)
@@ -483,6 +681,11 @@ public sealed class CodexSessionStatusBridge : IDisposable
                 session.TaskSummary = taskSummary;
             }
 
+            if (CodexSessionEventMapper.TryReadTaskDetail(line, out var taskDetail))
+            {
+                session.TaskDetail = taskDetail;
+            }
+
             if (!CodexSessionEventMapper.TryMapJsonLine(line, out var update))
             {
                 continue;
@@ -515,6 +718,7 @@ public sealed class CodexSessionStatusBridge : IDisposable
                 sessionId: session.SessionId ?? Path.GetFileNameWithoutExtension(session.Path),
                 taskSummary: session.TaskSummary ?? BuildFallbackSummary(session),
                 sourcePath: session.Path,
+                taskDetail: session.TaskDetail,
                 now: latestTimestamp)
             .ConfigureAwait(false);
     }
@@ -570,5 +774,7 @@ public sealed class CodexSessionStatusBridge : IDisposable
         public string? Workspace { get; set; }
 
         public string? TaskSummary { get; set; }
+
+        public string? TaskDetail { get; set; }
     }
 }

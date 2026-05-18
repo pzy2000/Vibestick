@@ -21,6 +21,7 @@ internal static class Program
             ("Coder status adapter parses tool_calling and ignores stale entries", TestCoderStatusAdapterAsync),
             ("Codex session event mapper emits safe pet statuses", TestCodexSessionEventMapperAsync),
             ("Codex task summary extraction ignores environment context", TestCodexTaskSummaryExtractionAsync),
+            ("Codex task detail extraction keeps readable progress", TestCodexTaskDetailExtractionAsync),
             ("Codex session bridge tails newest rollout", TestCodexSessionStatusBridgeAsync),
             ("Codex session bridge tracks multiple active rollouts", TestCodexSessionBridgeMultiSessionAsync),
             ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
@@ -282,9 +283,47 @@ internal static class Program
             out var eventSummary));
         AssertEqual("Fix task cards", eventSummary);
 
+        AssertTrue(CodexSessionEventMapper.TryReadTaskSummary(
+            """
+            {"type":"event_msg","payload":{"type":"user_message","message":"[$research-deep](C:\\Users\\ROG\\.codex\\skills\\research-deep\\SKILL.md) \u8bf7\u5e2e\u6211\u8c03\u7814\u4e00\u4e0b\u73b0\u5728\u57fa\u4e8eLLM\u7684Router\uff08\u7c7b\u4f3cCursor\u7684auto\uff09\u90fd\u662f\u600e\u4e48\u505a\u7684\uff0c\u7528\u7684\u4ec0\u4e48\u6a21\u578b\uff0c\u6709\u7528\u7c7b\u4f3cqwen3-1.5b\u8fd9\u79cd\u6a21\u578b\u7684\u65b9\u6848\u5417"}}
+            """,
+            out var routerSummary));
+        AssertEqual("\u8c03\u7814 LLM Router \u65b9\u6848", routerSummary);
+
+        AssertTrue(CodexSessionEventMapper.TryReadTaskSummary(
+            """
+            {"type":"event_msg","payload":{"type":"user_message","message":"Use `C:\\Users\\ROG\\Desktop\\Vibestick\\src\\Vibestick.Gui\\PetWindow.cs` to update cards"}}
+            """,
+            out var pathSummary));
+        AssertEqual("Use to update cards", pathSummary);
+
         AssertFalse(CodexSessionEventMapper.TryReadTaskSummary(
             """
             {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>only env</environment_context>"}]}}
+            """,
+            out _));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestCodexTaskDetailExtractionAsync()
+    {
+        AssertTrue(CodexSessionEventMapper.TryReadTaskDetail(
+            """
+            {"type":"event_msg","payload":{"type":"agent_message","message":"Reading C:\\repo\\secret.txt before writing JSON"}}
+            """,
+            out var eventDetail));
+        AssertEqual("Reading before writing JSON", eventDetail);
+
+        AssertTrue(CodexSessionEventMapper.TryReadTaskDetail(
+            """
+            {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Reviewing tool result for 35s"}]}}
+            """,
+            out var assistantDetail));
+        AssertEqual("Reviewing tool result for 35s", assistantDetail);
+
+        AssertFalse(CodexSessionEventMapper.TryReadTaskDetail(
+            """
+            {"type":"response_item","payload":{"type":"function_call_output","output":"secret output"}}
             """,
             out _));
         return Task.CompletedTask;
@@ -321,12 +360,14 @@ internal static class Program
         await File.AppendAllTextAsync(
                 newSession,
                 "{ this is not json" + Environment.NewLine +
+                """{"type":"event_msg","payload":{"type":"agent_message","message":"Checking parsed output"}}""" + Environment.NewLine +
                 """{"type":"response_item","payload":{"type":"function_call_output","output":"secret output"}}""" + Environment.NewLine)
             .ConfigureAwait(false);
 
         var reasoningStatus = await WaitForCoderStatusAsync(statusDirectory, CoderAgentPhase.Reasoning, TimeSpan.FromSeconds(5))
             .ConfigureAwait(false);
         AssertEqual("Reviewing tool result", reasoningStatus.Message);
+        AssertEqual("Checking parsed output", reasoningStatus.TaskDetail);
         AssertFalse(reasoningStatus.Message?.Contains("secret", StringComparison.OrdinalIgnoreCase) ?? false);
 
         bridge.Dispose();
@@ -831,10 +872,10 @@ internal static class Program
         Directory.CreateDirectory(directory);
 
         var writer = new CoderStatusWriter(directory);
-        await writer.EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", ttlSeconds: 60, sessionId: "session-1", taskSummary: "Authorize deployment").ConfigureAwait(false);
-        await writer.EmitAsync("codex", CoderAgentPhase.ToolCalling, "Using shell_command", ttlSeconds: 60, sessionId: "session-2", taskSummary: "Run focused tests").ConfigureAwait(false);
-        await writer.EmitAsync("codex", CoderAgentPhase.Reasoning, "Thinking", ttlSeconds: 60, sessionId: "session-3", taskSummary: "Design pet task cards").ConfigureAwait(false);
-        await writer.EmitAsync("codex", CoderAgentPhase.Running, "Running", ttlSeconds: 60, sessionId: "session-4", taskSummary: "Prepare docs").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", ttlSeconds: 60, sessionId: "session-1", taskSummary: "Authorize deployment", taskDetail: "Approval is needed").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.ToolCalling, "Using shell_command", ttlSeconds: 60, sessionId: "session-2", taskSummary: "Run focused tests", taskDetail: "Running focused tests").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.Reasoning, "Thinking", ttlSeconds: 60, sessionId: "session-3", taskSummary: "Design pet task cards", taskDetail: "Reviewing card layout").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.Running, "Running", ttlSeconds: 60, sessionId: "session-4", taskSummary: "Prepare docs", taskDetail: "Preparing docs").ConfigureAwait(false);
 
         var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
 
@@ -852,13 +893,21 @@ internal static class Program
             var snapshot = await WaitForPetTaskCardsAsync(directory, total: 4, visible: 3, hidden: 1, TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
             AssertEqual(false, snapshot["taskCards"]?["expanded"]?.GetValue<bool>());
+            AssertEqual(false, snapshot["statusBubbleVisible"]?.GetValue<bool>());
 
             var items = snapshot["taskCards"]?["items"]?.AsArray() ??
                 throw new InvalidOperationException("Snapshot missing task card items.");
             AssertEqual(3, items.Count);
             AssertEqual("Authorize deployment", items[0]?["summary"]?.GetValue<string>());
+            AssertEqual("Approval is needed", items[0]?["detail"]?.GetValue<string>());
+            AssertEqual("authorization", items[0]?["phaseIcon"]?.GetValue<string>());
+            AssertEqual("session:session-1", items[0]?["clickTarget"]?.GetValue<string>());
             AssertEqual("Run focused tests", items[1]?["summary"]?.GetValue<string>());
+            AssertEqual("Running focused tests", items[1]?["detail"]?.GetValue<string>());
+            AssertEqual("tool", items[1]?["phaseIcon"]?.GetValue<string>());
             AssertEqual("Design pet task cards", items[2]?["summary"]?.GetValue<string>());
+            AssertEqual("Reviewing card layout", items[2]?["detail"]?.GetValue<string>());
+            AssertEqual("thinking", items[2]?["phaseIcon"]?.GetValue<string>());
         }
         finally
         {
@@ -909,7 +958,8 @@ internal static class Program
         string? sessionId = null,
         string? summary = null,
         string? workspace = null,
-        string? sourcePath = null)
+        string? sourcePath = null,
+        string? taskDetail = null)
     {
         return new CoderAgentStatus(
             agent,
@@ -921,7 +971,8 @@ internal static class Program
             TtlSeconds: 120,
             sessionId,
             summary,
-            sourcePath);
+            sourcePath,
+            taskDetail);
     }
 
     private static string GetBatteryBadgeText(PetState state)

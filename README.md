@@ -57,9 +57,9 @@ Vibestick starts a local Codex status bridge with the pet by default. The bridge
 
 Use Codex normally after starting the pet; the pet switches between thinking, tool-calling, success, and other supported moods as new Codex session events arrive. Codex sessions are tracked separately by their session id, so concurrent conversations appear as separate task cards above the pet instead of overwriting one another.
 
-Task card summaries come from the first substantive user request in each Codex session. Environment-context records, image-only payloads, and oversized text are stripped before display. Unfinished sessions stay visible while they are recently active; completed sessions show success briefly and then expire.
+Task card titles come from the first substantive user request in each Codex session, with environment-context records, image payloads, skill links, local paths, and oversized text stripped before display. Recent assistant progress is shown as the card detail when available. Unfinished sessions stay visible while they are recently active; completed sessions show success briefly and then expire.
 
-The pet shows up to three task cards by default. If more sessions are active, a `+N` counter appears next to the chevron button; click the chevron to expand the bounded task list, and click it again to collapse. The `Reply` button is a focus shortcut: it tries to bring the matching Codex or editor window forward, then falls back to the control panel if no matching window is found.
+The pet shows up to three task cards by default. If more sessions are active, a `+N` counter appears next to the chevron button; click the chevron to expand the bounded task list, and click it again to collapse. Click a task card to bring the matching Codex or editor window forward; Vibestick falls back to the control panel if no matching window is found.
 
 To disable automatic Codex monitoring for debugging:
 
@@ -77,7 +77,7 @@ Manual adapter commands remain useful for testing and non-Codex integrations:
 .\scripts\vibestick.ps1 coder emit --agent codex --phase tool_calling --message "Running rg for status resolver" --ttl 30 --json
 .\scripts\vibestick.ps1 coder emit --agent codex --phase success --message "Patch complete" --ttl 30 --json
 .\scripts\vibestick.ps1 coder emit --agent codex --phase waiting_authorization --message "Approval needed" --ttl 120 --json
-.\scripts\vibestick.ps1 coder emit --agent codex --session-id demo-1 --summary "Implement task cards" --phase reasoning --message "Thinking" --ttl 120 --json
+.\scripts\vibestick.ps1 coder emit --agent codex --session-id demo-1 --summary "Implement task cards" --detail "Reviewing card layout" --phase reasoning --message "Thinking" --ttl 120 --json
 .\scripts\vibestick.ps1 coder clear --agent codex --json
 ```
 

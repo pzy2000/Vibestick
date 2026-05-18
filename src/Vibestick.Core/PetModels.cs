@@ -24,7 +24,8 @@ public sealed record CoderAgentStatus(
     int? TtlSeconds,
     string? SessionId = null,
     string? TaskSummary = null,
-    string? SourcePath = null);
+    string? SourcePath = null,
+    string? TaskDetail = null);
 
 public enum PetMood
 {

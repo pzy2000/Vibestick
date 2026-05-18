@@ -41,6 +41,7 @@ public sealed class PetWindow : Window
     private const double ResizeHitSpriteYRatio = 0.45;
     private const int CollapsedTaskCardLimit = 3;
     private const double ExpandedTaskListMaxHeight = 220;
+    private const double TaskCardWidth = 324;
 
     private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
     {
@@ -65,6 +66,7 @@ public sealed class PetWindow : Window
     private readonly TextBlock _taskOverflowText = new();
     private readonly TextBlock _titleText = new();
     private readonly TextBlock _messageText = new();
+    private readonly Border _statusBubble = new();
     private readonly StackPanel _badgesPanel = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly ScaleTransform _rootScale = new(DefaultScale, DefaultScale);
     private readonly Grid _spriteLayer = new()
@@ -253,27 +255,24 @@ public sealed class PetWindow : Window
         _taskScrollViewer.Content = _taskCardsPanel;
         _taskHost.Children.Add(_taskScrollViewer);
 
-        var bubble = new Border
+        _statusBubble.Width = 386;
+        _statusBubble.MinHeight = 68;
+        _statusBubble.Padding = new Thickness(12, 9, 12, 9);
+        _statusBubble.Margin = new Thickness(12, 4, 12, 4);
+        _statusBubble.Background = Brush("#f8fbff");
+        _statusBubble.BorderBrush = Brush("#d5deea");
+        _statusBubble.BorderThickness = new Thickness(1);
+        _statusBubble.CornerRadius = new CornerRadius(8);
+        _statusBubble.Effect = new System.Windows.Media.Effects.DropShadowEffect
         {
-            Width = 386,
-            MinHeight = 68,
-            Padding = new Thickness(12, 9, 12, 9),
-            Margin = new Thickness(12, 4, 12, 4),
-            Background = Brush("#f8fbff"),
-            BorderBrush = Brush("#d5deea"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8),
-            Effect = new System.Windows.Media.Effects.DropShadowEffect
-            {
-                BlurRadius = 12,
-                ShadowDepth = 2,
-                Opacity = 0.16
-            }
+            BlurRadius = 12,
+            ShadowDepth = 2,
+            Opacity = 0.16
         };
-        panel.Children.Add(bubble);
+        panel.Children.Add(_statusBubble);
 
         var bubbleStack = new StackPanel();
-        bubble.Child = bubbleStack;
+        _statusBubble.Child = bubbleStack;
 
         _titleText.FontSize = 13;
         _titleText.FontWeight = FontWeights.SemiBold;
@@ -367,6 +366,7 @@ public sealed class PetWindow : Window
         _messageText.Text = state.Message;
         ToolTip = $"{state.Title}: {state.Message}";
         RenderTaskCards(state);
+        _statusBubble.Visibility = _lastTaskCardsTotal > 0 ? Visibility.Collapsed : Visibility.Visible;
 
         _badgesPanel.Children.Clear();
         foreach (var badge in state.Badges.Take(3))
@@ -436,15 +436,19 @@ public sealed class PetWindow : Window
         {
             var summary = GetTaskSummary(coder);
             var status = GetTaskStatus(coder, state.UpdatedAtUtc);
+            var detail = GetTaskDetail(coder, status);
             snapshots.Add(new TaskCardSnapshot(
                 coder.Agent,
                 coder.SessionId,
                 summary,
+                detail,
                 coder.Phase,
                 status,
                 coder.Workspace,
-                coder.SourcePath));
-            _taskCardsPanel.Children.Add(BuildTaskCard(coder, summary, status, cardBrushes));
+                coder.SourcePath,
+                GetClickTarget(coder),
+                GetPhaseIconName(coder.Phase)));
+            _taskCardsPanel.Children.Add(BuildTaskCard(coder, summary, detail, status, cardBrushes));
         }
 
         _lastRenderedTaskCards = snapshots;
@@ -453,25 +457,34 @@ public sealed class PetWindow : Window
     private Border BuildTaskCard(
         CoderAgentStatus coder,
         string summary,
+        string detail,
         string status,
         TaskCardBrushes cardBrushes)
     {
         var card = new Border
         {
-            Width = 386,
-            MinHeight = 58,
+            Width = TaskCardWidth,
+            MinHeight = 70,
             Margin = new Thickness(0, 0, 0, 6),
-            Padding = new Thickness(10, 8, 10, 8),
+            Padding = new Thickness(12, 8, 10, 9),
             Background = cardBrushes.Background,
             BorderBrush = cardBrushes.Border,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
+            Cursor = InputCursors.Hand,
+            ToolTip = $"{summary}: {detail}",
             Effect = new System.Windows.Media.Effects.DropShadowEffect
             {
-                BlurRadius = 10,
+                BlurRadius = 12,
                 ShadowDepth = 2,
                 Opacity = cardBrushes.ShadowOpacity
             }
+        };
+        card.MouseLeftButtonDown += (_, args) => args.Handled = true;
+        card.MouseLeftButtonUp += (_, args) =>
+        {
+            args.Handled = true;
+            FocusCoderOrControlPanel(coder);
         };
 
         var grid = new Grid();
@@ -487,67 +500,75 @@ public sealed class PetWindow : Window
             FontSize = 13,
             FontWeight = FontWeights.SemiBold,
             Foreground = cardBrushes.PrimaryText,
-            TextWrapping = TextWrapping.Wrap,
+            TextWrapping = TextWrapping.NoWrap,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxHeight = 36,
-            Margin = new Thickness(0, 0, 10, 2)
+            MaxWidth = TaskCardWidth - 58,
+            Margin = new Thickness(0, 0, 12, 3)
         };
         grid.Children.Add(summaryText);
 
-        var statusPanel = new StackPanel
+        var detailText = new TextBlock
         {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 2, 8, 0)
+            Text = detail,
+            FontSize = 11,
+            Foreground = cardBrushes.SecondaryText,
+            TextWrapping = TextWrapping.Wrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            LineHeight = 15,
+            MaxHeight = 32,
+            MaxWidth = TaskCardWidth - 34,
+            Margin = new Thickness(0, 0, 12, 0)
         };
-        Grid.SetRow(statusPanel, 1);
-        grid.Children.Add(statusPanel);
+        Grid.SetRow(detailText, 1);
+        grid.Children.Add(detailText);
 
-        statusPanel.Children.Add(new Ellipse
+        var phaseIcon = BuildPhaseIcon(coder.Phase, cardBrushes, status);
+        Grid.SetColumn(phaseIcon, 1);
+        Grid.SetRow(phaseIcon, 0);
+        Grid.SetRowSpan(phaseIcon, 2);
+        grid.Children.Add(phaseIcon);
+
+        return card;
+    }
+
+    private void FocusCoderOrControlPanel(CoderAgentStatus coder)
+    {
+        if (!WindowFocusService.TryFocusCoderWindow(coder))
+        {
+            _openControlPanel();
+        }
+    }
+
+    private static Grid BuildPhaseIcon(CoderAgentPhase phase, TaskCardBrushes cardBrushes, string status)
+    {
+        var icon = new Grid
+        {
+            Width = 18,
+            Height = 18,
+            Margin = new Thickness(6, 1, 0, 0),
+            VerticalAlignment = VerticalAlignment.Top,
+            ToolTip = status
+        };
+        icon.Children.Add(new Ellipse
+        {
+            Width = 17,
+            Height = 17,
+            Fill = Brush("#ffffff"),
+            Stroke = cardBrushes.Border,
+            StrokeThickness = 1,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        icon.Children.Add(new Ellipse
         {
             Width = 7,
             Height = 7,
-            Fill = PhaseBrush(coder.Phase),
-            Margin = new Thickness(0, 0, 6, 0),
+            Fill = PhaseBrush(phase),
+            HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         });
-        statusPanel.Children.Add(new TextBlock
-        {
-            Text = status,
-            FontSize = 11,
-            Foreground = cardBrushes.SecondaryText,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = 260
-        });
 
-        var replyButton = new Button
-        {
-            Content = "Reply",
-            Width = 54,
-            Height = 26,
-            Padding = new Thickness(0),
-            FontSize = 12,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = cardBrushes.PrimaryText,
-            Background = cardBrushes.ButtonBackground,
-            BorderBrush = cardBrushes.Border,
-            BorderThickness = new Thickness(1),
-            Cursor = InputCursors.Hand,
-            ToolTip = "Focus this Codex session"
-        };
-        replyButton.Click += (_, args) =>
-        {
-            args.Handled = true;
-            if (!WindowFocusService.TryFocusCoderWindow(coder))
-            {
-                _openControlPanel();
-            }
-        };
-        Grid.SetColumn(replyButton, 1);
-        Grid.SetRowSpan(replyButton, 2);
-        grid.Children.Add(replyButton);
-
-        return card;
+        return icon;
     }
 
     private static bool ShouldShowTaskCard(CoderAgentStatus status)
@@ -580,6 +601,16 @@ public sealed class PetWindow : Window
         return $"{FormatAgentName(coder.Agent)} task";
     }
 
+    private static string GetTaskDetail(CoderAgentStatus coder, string status)
+    {
+        if (!string.IsNullOrWhiteSpace(coder.TaskDetail))
+        {
+            return coder.TaskDetail!;
+        }
+
+        return status;
+    }
+
     private static string GetTaskStatus(CoderAgentStatus coder, DateTimeOffset now)
     {
         var baseStatus = !string.IsNullOrWhiteSpace(coder.Message)
@@ -603,6 +634,42 @@ public sealed class PetWindow : Window
         }
 
         return baseStatus;
+    }
+
+    private static string GetClickTarget(CoderAgentStatus coder)
+    {
+        if (!string.IsNullOrWhiteSpace(coder.SourcePath))
+        {
+            return coder.SourcePath!;
+        }
+
+        if (coder.ProcessId.HasValue)
+        {
+            return $"pid:{coder.ProcessId.Value}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(coder.SessionId))
+        {
+            return $"session:{coder.SessionId}";
+        }
+
+        return $"agent:{coder.Agent}";
+    }
+
+    private static string GetPhaseIconName(CoderAgentPhase phase)
+    {
+        return phase switch
+        {
+            CoderAgentPhase.Error => "error",
+            CoderAgentPhase.WaitingAuthorization => "authorization",
+            CoderAgentPhase.ToolCalling => "tool",
+            CoderAgentPhase.Reasoning => "thinking",
+            CoderAgentPhase.Success => "success",
+            CoderAgentPhase.Offline => "offline",
+            CoderAgentPhase.Running => "running",
+            CoderAgentPhase.Sleeping => "sleeping",
+            _ => "active"
+        };
     }
 
     private static string FormatElapsed(TimeSpan elapsed)
@@ -867,6 +934,7 @@ public sealed class PetWindow : Window
                 Width,
                 Height,
                 Scale = _scale,
+                StatusBubbleVisible = _statusBubble.Visibility == Visibility.Visible,
                 TaskCards = new
                 {
                     Total = _lastTaskCardsTotal,
@@ -913,10 +981,13 @@ public sealed class PetWindow : Window
         string Agent,
         string? SessionId,
         string Summary,
+        string Detail,
         CoderAgentPhase Phase,
         string Status,
         string? Workspace,
-        string? SourcePath);
+        string? SourcePath,
+        string ClickTarget,
+        string PhaseIcon);
 
     private enum PointerInteraction
     {
