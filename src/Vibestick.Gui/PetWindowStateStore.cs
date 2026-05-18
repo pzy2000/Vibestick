@@ -6,7 +6,8 @@ namespace Vibestick.Gui;
 public sealed record PetWindowPlacement(
     double Left,
     double Top,
-    double? Scale = null);
+    double? Scale = null,
+    bool? WalkingEnabled = null);
 
 public sealed class PetWindowStateStore
 {

@@ -18,7 +18,9 @@ public sealed record PetSpriteFrameSnapshot(
     int Column,
     int Row,
     int FrameIndex,
-    string? Direction);
+    string? Direction,
+    double MotionOffsetX = 0,
+    double MotionOffsetY = 0);
 
 public sealed class PetSpriteAnimator
 {
@@ -32,6 +34,7 @@ public sealed class PetSpriteAnimator
     private readonly TextBlock _fallback;
     private readonly BitmapSource? _sheet;
     private readonly ScaleTransform _directionTransform = new(1, 1);
+    private readonly TranslateTransform _motionTransform = new();
     private PetMood _mood = PetMood.Idle;
     private PetSpriteCrawlDirection? _crawlDirection;
     private bool _isHovering;
@@ -42,8 +45,11 @@ public sealed class PetSpriteAnimator
         _image = image;
         _fallback = fallback;
         _sheet = LoadSheet();
+        var transformGroup = new TransformGroup();
+        transformGroup.Children.Add(_directionTransform);
+        transformGroup.Children.Add(_motionTransform);
         _image.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
-        _image.RenderTransform = _directionTransform;
+        _image.RenderTransform = transformGroup;
         _image.Visibility = _sheet is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
         _fallback.Visibility = _sheet is null ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
         Render();
@@ -108,6 +114,8 @@ public sealed class PetSpriteAnimator
 
         var (column, row) = (frame.Column, frame.Row);
         _directionTransform.ScaleX = _crawlDirection == PetSpriteCrawlDirection.Left ? -1 : 1;
+        _motionTransform.X = frame.MotionOffsetX;
+        _motionTransform.Y = frame.MotionOffsetY;
         _image.Source = new CroppedBitmap(
             _sheet,
             new System.Windows.Int32Rect(
@@ -132,7 +140,15 @@ public sealed class PetSpriteAnimator
         if (_crawlDirection is not null)
         {
             var (column, row) = GetCrawlFrame(_frameIndex);
-            return new PetSpriteFrameSnapshot("crawling", column, row, _frameIndex, _crawlDirection.ToString());
+            var (offsetX, offsetY) = GetCrawlMotion(_frameIndex, _crawlDirection.Value);
+            return new PetSpriteFrameSnapshot(
+                "crawling",
+                column,
+                row,
+                _frameIndex,
+                _crawlDirection.ToString(),
+                offsetX,
+                offsetY);
         }
 
         if (_isHovering)
@@ -166,6 +182,18 @@ public sealed class PetSpriteAnimator
     private static (int Column, int Row) GetCrawlFrame(int frameIndex)
     {
         return (frameIndex % CrawlFrameCount, 1);
+    }
+
+    private static (double OffsetX, double OffsetY) GetCrawlMotion(int frameIndex, PetSpriteCrawlDirection direction)
+    {
+        var signedStride = direction == PetSpriteCrawlDirection.Right ? 1 : -1;
+        return (frameIndex % CrawlFrameCount) switch
+        {
+            0 => (-2 * signedStride, 1),
+            1 => (2 * signedStride, -7),
+            2 => (5 * signedStride, -3),
+            _ => (1 * signedStride, 2)
+        };
     }
 
     private static (int Column, int Row) GetHoverFrame(int frameIndex)

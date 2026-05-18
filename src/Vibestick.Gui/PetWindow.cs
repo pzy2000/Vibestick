@@ -25,6 +25,7 @@ using Directory = System.IO.Directory;
 using File = System.IO.File;
 using IOException = System.IO.IOException;
 using Path = System.IO.Path;
+using Forms = System.Windows.Forms;
 
 namespace Vibestick.Gui;
 
@@ -40,12 +41,20 @@ public sealed class PetWindow : Window
     private const double ResizeHitPadding = 16;
     private const double ResizeHitSpriteYRatio = 0.45;
     private const double CrawlDirectionThreshold = 0.75;
+    private const double WalkSpeedDipPerSecond = 56;
+    private const double WalkBottomMargin = 16;
     private const int CollapsedTaskCardLimit = 3;
     private const double ExpandedTaskListMaxHeight = 220;
     private const double TaskCardWidth = 324;
     private static readonly TimeSpan MoodFrameInterval = TimeSpan.FromMilliseconds(420);
     private static readonly TimeSpan CrawlFrameInterval = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan HoverFrameInterval = TimeSpan.FromMilliseconds(240);
+    private static readonly TimeSpan WalkTickInterval = TimeSpan.FromMilliseconds(33);
+    private static readonly TimeSpan WalkEdgePause = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan WalkDurationBeforePause = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan WalkRestPause = TimeSpan.FromMilliseconds(1800);
+    private static readonly TimeSpan WalkResumeDelay = TimeSpan.FromMilliseconds(700);
+    private static readonly TimeSpan WalkSnapshotInterval = TimeSpan.FromMilliseconds(250);
 
     private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
     {
@@ -61,7 +70,11 @@ public sealed class PetWindow : Window
     private readonly Action _exitApplication;
     private readonly DispatcherTimer _statusTimer;
     private readonly DispatcherTimer _statusDebounceTimer;
+    private readonly DispatcherTimer _statusBubbleSingleClickTimer;
     private readonly DispatcherTimer _frameTimer;
+    private readonly DispatcherTimer _walkTimer;
+    private readonly DispatcherTimer _walkResumeTimer;
+    private readonly MenuItem _walkingToggleMenuItem = new();
     private readonly System.IO.FileSystemWatcher? _statusWatcher;
     private readonly StackPanel _taskHost = new();
     private readonly StackPanel _taskCardsPanel = new();
@@ -95,6 +108,15 @@ public sealed class PetWindow : Window
     private int _lastTaskCardsTotal;
     private int _lastTaskCardsVisible;
     private int _lastTaskCardsHidden;
+    private bool _walkingEnabled = true;
+    private bool _walkTemporarilyPaused;
+    private PetSpriteCrawlDirection _walkDirection = PetSpriteCrawlDirection.Left;
+    private DateTimeOffset? _lastWalkTickUtc;
+    private DateTimeOffset? _walkPauseUntilUtc;
+    private DateTimeOffset _lastSnapshotWriteUtc = DateTimeOffset.MinValue;
+    private TimeSpan _walkedSincePause = TimeSpan.Zero;
+    private WalkBoundsSnapshot _lastWalkBoundsSnapshot = WalkBoundsSnapshot.Empty;
+    private double _lastWalkLaneTop;
 
     public PetWindow(
         GuiServices services,
@@ -154,18 +176,43 @@ public sealed class PetWindow : Window
         };
         _statusWatcher = CreateStatusWatcher();
 
+        _statusBubbleSingleClickTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(Forms.SystemInformation.DoubleClickTime + 30)
+        };
+        _statusBubbleSingleClickTimer.Tick += (_, _) =>
+        {
+            _statusBubbleSingleClickTimer.Stop();
+            HandlePrimaryClick();
+        };
+
         _frameTimer = new DispatcherTimer { Interval = MoodFrameInterval };
         _frameTimer.Tick += (_, _) => _spriteAnimator.AdvanceFrame();
         _frameTimer.Start();
+
+        _walkTimer = new DispatcherTimer { Interval = WalkTickInterval };
+        _walkTimer.Tick += (_, _) => UpdateAutoWalk();
+        _walkTimer.Start();
+
+        _walkResumeTimer = new DispatcherTimer { Interval = WalkResumeDelay };
+        _walkResumeTimer.Tick += (_, _) =>
+        {
+            _walkResumeTimer.Stop();
+            ResumeWalkingAfterInteraction();
+        };
 
         Loaded += async (_, _) =>
         {
             ApplyInitialPlacement();
             await RefreshNowAsync().ConfigureAwait(true);
+            SyncWalkingAnimation();
         };
         Closing += (_, _) =>
         {
             _statusDebounceTimer.Stop();
+            _statusBubbleSingleClickTimer.Stop();
+            _walkTimer.Stop();
+            _walkResumeTimer.Stop();
             _statusWatcher?.Dispose();
             SavePlacement();
         };
@@ -271,6 +318,7 @@ public sealed class PetWindow : Window
         _statusBubble.BorderBrush = Brush("#d5deea");
         _statusBubble.BorderThickness = new Thickness(1);
         _statusBubble.CornerRadius = new CornerRadius(8);
+        _statusBubble.Cursor = InputCursors.Hand;
         _statusBubble.Effect = new System.Windows.Media.Effects.DropShadowEffect
         {
             BlurRadius = 12,
@@ -315,6 +363,10 @@ public sealed class PetWindow : Window
         var refresh = new MenuItem { Header = "Refresh Pet" };
         refresh.Click += async (_, _) => await RefreshNowAsync().ConfigureAwait(true);
         menu.Items.Add(refresh);
+
+        _walkingToggleMenuItem.Click += (_, _) => ToggleWalking();
+        UpdateWalkingMenuText();
+        menu.Items.Add(_walkingToggleMenuItem);
 
         menu.Items.Add(new Separator());
         var exit = new MenuItem { Header = "Exit Vibestick" };
@@ -488,11 +540,21 @@ public sealed class PetWindow : Window
                 Opacity = cardBrushes.ShadowOpacity
             }
         };
-        card.MouseLeftButtonDown += (_, args) => args.Handled = true;
+        card.MouseLeftButtonDown += (_, args) =>
+        {
+            args.Handled = true;
+            if (args.ClickCount >= 2)
+            {
+                FocusCoderOrControlPanel(coder);
+            }
+        };
         card.MouseLeftButtonUp += (_, args) =>
         {
             args.Handled = true;
-            FocusCoderOrControlPanel(coder);
+            if (args.ClickCount < 2)
+            {
+                FocusCoderOrControlPanel(coder);
+            }
         };
 
         var grid = new Grid();
@@ -541,10 +603,26 @@ public sealed class PetWindow : Window
 
     private void FocusCoderOrControlPanel(CoderAgentStatus coder)
     {
-        if (!WindowFocusService.TryFocusCoderWindow(coder))
+        if (!TryFocusCoderOrCodexWindow(coder))
         {
             _openControlPanel();
         }
+    }
+
+    private bool TryFocusCoderOrCodexWindow(CoderAgentStatus? coder)
+    {
+        if (WindowFocusService.TryFocusCoderWindow(coder))
+        {
+            return true;
+        }
+
+        if (coder is null ||
+            string.Equals(coder.Agent, "codex", StringComparison.OrdinalIgnoreCase))
+        {
+            return WindowFocusService.TryFocusCodexAppWindow(coder?.Workspace);
+        }
+
+        return false;
     }
 
     private static Grid BuildPhaseIcon(CoderAgentPhase phase, TaskCardBrushes cardBrushes, string status)
@@ -773,23 +851,29 @@ public sealed class PetWindow : Window
         if (saved is not null)
         {
             ApplyScale(saved.Scale ?? DefaultScale);
+            _walkingEnabled = saved.WalkingEnabled ?? true;
             Left = Clamp(saved.Left, SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width);
             Top = Clamp(saved.Top, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height);
+            AlignToWalkLane();
+            UpdateWalkingMenuText();
             return;
         }
 
         ApplyScale(DefaultScale);
         Left = SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width - DefaultMargin;
         Top = SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height - DefaultMargin;
+        AlignToWalkLane();
+        UpdateWalkingMenuText();
     }
 
     private void SavePlacement()
     {
-        _placementStore.Save(new PetWindowPlacement(Left, Top, _scale));
+        _placementStore.Save(new PetWindowPlacement(Left, Top, _scale, _walkingEnabled));
     }
 
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
     {
+        PauseWalkingForInteraction();
         _dragStart = ToScreenDip(args.GetPosition(this));
         _lastDragPoint = _dragStart;
         _windowStart = new Point(Left, Top);
@@ -837,11 +921,20 @@ public sealed class PetWindow : Window
         ReleaseMouseCapture();
         if (_dragStart is not null && !_isDragging && _pointerInteraction == PointerInteraction.Move)
         {
-            HandlePrimaryClick();
+            if (IsPointerOver(_statusBubble, args))
+            {
+                HandleStatusBubbleClick(args);
+            }
+            else
+            {
+                _statusBubbleSingleClickTimer.Stop();
+                HandlePrimaryClick();
+            }
         }
 
         if (_isDragging)
         {
+            AlignToWalkLane();
             SavePlacement();
         }
 
@@ -850,6 +943,7 @@ public sealed class PetWindow : Window
         _lastDragPoint = null;
         _isDragging = false;
         Cursor = IsResizeHit(args) ? InputCursors.SizeNWSE : InputCursors.Arrow;
+        ScheduleWalkingResume();
     }
 
     private void StartSpriteHover()
@@ -866,7 +960,7 @@ public sealed class PetWindow : Window
     private void StopSpriteHover()
     {
         _spriteAnimator.SetHovering(false);
-        if (!_isDragging)
+        if (!_isDragging && !IsAutoWalking)
         {
             _frameTimer.Interval = MoodFrameInterval;
         }
@@ -894,7 +988,239 @@ public sealed class PetWindow : Window
     {
         _spriteAnimator.SetCrawlDirection(null);
         _spriteAnimator.SetHovering(false);
-        _frameTimer.Interval = MoodFrameInterval;
+        _frameTimer.Interval = IsAutoWalking ? CrawlFrameInterval : MoodFrameInterval;
+    }
+
+    private bool IsAutoWalking =>
+        IsLoaded &&
+        _walkingEnabled &&
+        !_walkTemporarilyPaused &&
+        !_isDragging &&
+        (_walkPauseUntilUtc is null || _walkPauseUntilUtc <= DateTimeOffset.UtcNow);
+
+    private void UpdateAutoWalk()
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        if (!_walkingEnabled || _walkTemporarilyPaused || _isDragging)
+        {
+            _lastWalkTickUtc = null;
+            SyncWalkingAnimation();
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (_walkPauseUntilUtc is not null && _walkPauseUntilUtc > now)
+        {
+            _lastWalkTickUtc = now;
+            SyncWalkingAnimation();
+            WriteRuntimeSnapshotIfReady(now);
+            return;
+        }
+
+        _walkPauseUntilUtc = null;
+        var previousTick = _lastWalkTickUtc ?? now;
+        _lastWalkTickUtc = now;
+        var elapsed = now - previousTick;
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+        else if (elapsed > TimeSpan.FromMilliseconds(250))
+        {
+            elapsed = TimeSpan.FromMilliseconds(250);
+        }
+
+        var bounds = GetCurrentWalkBounds();
+        _lastWalkBoundsSnapshot = WalkBoundsSnapshot.FromRect(bounds);
+        _lastWalkLaneTop = GetWalkLaneTop(bounds);
+        Top = _lastWalkLaneTop;
+
+        var step = WalkSpeedDipPerSecond * elapsed.TotalSeconds *
+            (_walkDirection == PetSpriteCrawlDirection.Right ? 1 : -1);
+        var minLeft = bounds.Left;
+        var maxLeft = Math.Max(bounds.Left, bounds.Right - Width);
+        Left = Clamp(Left + step, minLeft, maxLeft);
+
+        var hitLeftEdge = Left <= minLeft && _walkDirection == PetSpriteCrawlDirection.Left;
+        var hitRightEdge = Left >= maxLeft && _walkDirection == PetSpriteCrawlDirection.Right;
+        if (hitLeftEdge || hitRightEdge)
+        {
+            _walkDirection = _walkDirection == PetSpriteCrawlDirection.Left
+                ? PetSpriteCrawlDirection.Right
+                : PetSpriteCrawlDirection.Left;
+            _walkPauseUntilUtc = now + WalkEdgePause;
+            _walkedSincePause = TimeSpan.Zero;
+            SyncWalkingAnimation();
+            WriteRuntimeSnapshotIfReady(now);
+            return;
+        }
+
+        _walkedSincePause += elapsed;
+        if (_walkedSincePause >= WalkDurationBeforePause)
+        {
+            _walkPauseUntilUtc = now + WalkRestPause;
+            _walkedSincePause = TimeSpan.Zero;
+            SyncWalkingAnimation();
+            WriteRuntimeSnapshotIfReady(now);
+            return;
+        }
+
+        SyncWalkingAnimation();
+        WriteRuntimeSnapshotIfReady(now);
+    }
+
+    private void PauseWalkingForInteraction()
+    {
+        if (!_walkingEnabled)
+        {
+            return;
+        }
+
+        _walkTemporarilyPaused = true;
+        _walkResumeTimer.Stop();
+        _walkPauseUntilUtc = null;
+        _lastWalkTickUtc = null;
+        SyncWalkingAnimation();
+    }
+
+    private void ScheduleWalkingResume()
+    {
+        if (!_walkingEnabled)
+        {
+            return;
+        }
+
+        _walkResumeTimer.Stop();
+        _walkResumeTimer.Start();
+    }
+
+    private void ResumeWalkingAfterInteraction()
+    {
+        _walkTemporarilyPaused = false;
+        _lastWalkTickUtc = null;
+        _walkPauseUntilUtc = null;
+        AlignToWalkLane();
+        SyncWalkingAnimation();
+        WriteRuntimeSnapshotIfReady(DateTimeOffset.UtcNow);
+    }
+
+    private void ToggleWalking()
+    {
+        _walkingEnabled = !_walkingEnabled;
+        _walkTemporarilyPaused = false;
+        _walkPauseUntilUtc = null;
+        _lastWalkTickUtc = null;
+        _walkedSincePause = TimeSpan.Zero;
+        _walkResumeTimer.Stop();
+
+        if (_walkingEnabled)
+        {
+            AlignToWalkLane();
+        }
+
+        SyncWalkingAnimation();
+        UpdateWalkingMenuText();
+        SavePlacement();
+        WriteRuntimeSnapshotIfReady(DateTimeOffset.UtcNow, force: true);
+    }
+
+    private void UpdateWalkingMenuText()
+    {
+        _walkingToggleMenuItem.Header = _walkingEnabled ? "Pause Walking" : "Resume Walking";
+    }
+
+    private void SyncWalkingAnimation()
+    {
+        if (IsAutoWalking)
+        {
+            _spriteAnimator.SetHovering(false);
+            _spriteAnimator.SetCrawlDirection(_walkDirection);
+            _frameTimer.Interval = CrawlFrameInterval;
+            return;
+        }
+
+        if (!_isDragging)
+        {
+            _spriteAnimator.SetCrawlDirection(null);
+            _frameTimer.Interval = MoodFrameInterval;
+        }
+    }
+
+    private void AlignToWalkLane()
+    {
+        var bounds = GetCurrentWalkBounds();
+        _lastWalkBoundsSnapshot = WalkBoundsSnapshot.FromRect(bounds);
+        _lastWalkLaneTop = GetWalkLaneTop(bounds);
+        Left = Clamp(Left, bounds.Left, Math.Max(bounds.Left, bounds.Right - Width));
+        Top = _lastWalkLaneTop;
+    }
+
+    private double GetWalkLaneTop(Rect bounds)
+    {
+        return Clamp(bounds.Bottom - Height - WalkBottomMargin, bounds.Top, Math.Max(bounds.Top, bounds.Bottom - Height));
+    }
+
+    private Rect GetCurrentWalkBounds()
+    {
+        try
+        {
+            var centerDip = new Point(Left + Width / 2, Top + Height / 2);
+            var source = PresentationSource.FromVisual(this);
+            var centerDevice = source?.CompositionTarget?.TransformToDevice.Transform(centerDip) ?? centerDip;
+            var screen = Forms.Screen.FromPoint(new System.Drawing.Point(
+                (int)Math.Round(centerDevice.X),
+                (int)Math.Round(centerDevice.Y)));
+            return DeviceRectToDip(screen.WorkingArea);
+        }
+        catch
+        {
+            return new Rect(
+                SystemParameters.VirtualScreenLeft,
+                SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth,
+                SystemParameters.VirtualScreenHeight);
+        }
+    }
+
+    private Rect DeviceRectToDip(System.Drawing.Rectangle rectangle)
+    {
+        var topLeft = new Point(rectangle.Left, rectangle.Top);
+        var bottomRight = new Point(rectangle.Right, rectangle.Bottom);
+        var source = PresentationSource.FromVisual(this);
+        if (source?.CompositionTarget is not null)
+        {
+            topLeft = source.CompositionTarget.TransformFromDevice.Transform(topLeft);
+            bottomRight = source.CompositionTarget.TransformFromDevice.Transform(bottomRight);
+        }
+
+        return new Rect(topLeft, bottomRight);
+    }
+
+    private bool IsWalkingPaused(DateTimeOffset now)
+    {
+        return _walkingEnabled &&
+            (_walkTemporarilyPaused ||
+                _isDragging ||
+                (_walkPauseUntilUtc is not null && _walkPauseUntilUtc > now));
+    }
+
+    private void WriteRuntimeSnapshotIfReady(DateTimeOffset now, bool force = false)
+    {
+        if (_currentState is null)
+        {
+            return;
+        }
+
+        if (!force && now - _lastSnapshotWriteUtc < WalkSnapshotInterval)
+        {
+            return;
+        }
+
+        WriteRuntimeSnapshot(_currentState);
     }
 
     private void HandlePrimaryClick()
@@ -906,6 +1232,39 @@ public sealed class PetWindow : Window
         }
 
         _openControlPanel();
+    }
+
+    private void HandleStatusBubbleClick(MouseButtonEventArgs args)
+    {
+        if (args.ClickCount >= 2)
+        {
+            _statusBubbleSingleClickTimer.Stop();
+            if (!TryFocusCoderOrCodexWindow(_currentState?.PrimaryCoder))
+            {
+                _openControlPanel();
+            }
+
+            return;
+        }
+
+        _statusBubbleSingleClickTimer.Stop();
+        _statusBubbleSingleClickTimer.Start();
+    }
+
+    private static bool IsPointerOver(FrameworkElement element, MouseEventArgs args)
+    {
+        if (element.Visibility != Visibility.Visible ||
+            element.ActualWidth <= 0 ||
+            element.ActualHeight <= 0)
+        {
+            return false;
+        }
+
+        var point = args.GetPosition(element);
+        return point.X >= 0 &&
+            point.Y >= 0 &&
+            point.X <= element.ActualWidth &&
+            point.Y <= element.ActualHeight;
     }
 
     private Point ToScreenDip(Point localPoint)
@@ -981,6 +1340,7 @@ public sealed class PetWindow : Window
     {
         try
         {
+            var now = DateTimeOffset.UtcNow;
             Directory.CreateDirectory(_services.CoderStatusDirectory);
             var snapshot = new
             {
@@ -993,6 +1353,14 @@ public sealed class PetWindow : Window
                 Height,
                 Scale = _scale,
                 Sprite = _spriteAnimator.CurrentFrame,
+                Walking = new
+                {
+                    Enabled = _walkingEnabled,
+                    Paused = IsWalkingPaused(now),
+                    Direction = _walkDirection.ToString(),
+                    Bounds = _lastWalkBoundsSnapshot,
+                    LaneTop = _lastWalkLaneTop
+                },
                 StatusBubbleVisible = _statusBubble.Visibility == Visibility.Visible,
                 TaskCards = new
                 {
@@ -1002,11 +1370,12 @@ public sealed class PetWindow : Window
                     Expanded = _taskListExpanded,
                     Items = _lastRenderedTaskCards
                 },
-                UpdatedAtUtc = DateTimeOffset.UtcNow
+                UpdatedAtUtc = now
             };
             File.WriteAllText(
                 Path.Combine(_services.CoderStatusDirectory, "pet-runtime-state.snapshot"),
                 JsonSerializer.Serialize(snapshot, SnapshotJsonOptions));
+            _lastSnapshotWriteUtc = now;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -1047,6 +1416,22 @@ public sealed class PetWindow : Window
         string? SourcePath,
         string ClickTarget,
         string PhaseIcon);
+
+    private sealed record WalkBoundsSnapshot(
+        double Left,
+        double Top,
+        double Right,
+        double Bottom,
+        double Width,
+        double Height)
+    {
+        public static WalkBoundsSnapshot Empty { get; } = new(0, 0, 0, 0, 0, 0);
+
+        public static WalkBoundsSnapshot FromRect(Rect rect)
+        {
+            return new WalkBoundsSnapshot(rect.Left, rect.Top, rect.Right, rect.Bottom, rect.Width, rect.Height);
+        }
+    }
 
     private enum PointerInteraction
     {

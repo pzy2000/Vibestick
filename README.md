@@ -39,13 +39,13 @@ On this machine the SDK was installed with `dotnet-install` under `%USERPROFILE%
 
 ## GUI
 
-The GUI starts as a desktop pet by default. It appears near the bottom-right of the virtual desktop, stays on top, can be dragged, and opens the existing control panel when clicked:
+The GUI starts as a desktop pet by default. It stays on top, patrols along the bottom of the desktop like a classic QQ pet, can be dragged or resized, and opens the existing control panel when clicked:
 
 ```powershell
 .\scripts\vibestick-gui.ps1
 ```
 
-Right-click the pet or tray icon for the control panel and exit actions. The control panel still exposes status refresh, diagnostics, ON, HYPER, Stop HYPER Guard, and OFF/Revert controls. HYPER in the GUI keeps a sleep blocker active while the control panel remains open or until you stop the guard.
+Right-click the pet to pause or resume walking, open the control panel, refresh, or exit. The tray icon also exposes the control panel, pet, and exit actions. The control panel still exposes status refresh, diagnostics, ON, HYPER, Stop HYPER Guard, and OFF/Revert controls. HYPER in the GUI keeps a sleep blocker active while the control panel remains open or until you stop the guard.
 
 ## Desktop Pet Coder Status
 

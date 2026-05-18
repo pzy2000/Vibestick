@@ -8,6 +8,7 @@ namespace Vibestick.Gui;
 public static class WindowFocusService
 {
     private static readonly string[] LikelyCoderProcesses = { "codex", "Code", "Cursor", "VSCodium" };
+    private static readonly string[] CodexProcesses = { "codex", "Codex" };
 
     public static bool TryFocusCoderWindow(CoderAgentStatus? status)
     {
@@ -22,9 +23,15 @@ public static class WindowFocusService
         }
 
         var workspaceName = GetWorkspaceName(status.Workspace);
+        if (string.Equals(status.Agent, "codex", StringComparison.OrdinalIgnoreCase) &&
+            TryFocusCodexAppWindow(status.Workspace))
+        {
+            return true;
+        }
+
         foreach (var processName in LikelyCoderProcesses)
         {
-            foreach (var process in Process.GetProcessesByName(processName))
+            foreach (var process in GetUniqueProcessesByName(processName))
             {
                 try
                 {
@@ -40,8 +47,8 @@ public static class WindowFocusService
                         return TryFocusProcessWindow(process.Id);
                     }
 
-                    if (string.Equals(processName, "codex", StringComparison.OrdinalIgnoreCase) ||
-                        title.Contains("Codex", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(status.Agent, "codex", StringComparison.OrdinalIgnoreCase) &&
+                        IsCodexDesktopWindow(process, title))
                     {
                         return TryFocusProcessWindow(process.Id);
                     }
@@ -49,6 +56,43 @@ public static class WindowFocusService
                 catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
                 {
                 }
+            }
+        }
+
+        return false;
+    }
+
+    public static bool TryFocusCodexAppWindow(string? workspace = null)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        var workspaceName = GetWorkspaceName(workspace);
+        foreach (var process in GetUniqueProcessesByName(CodexProcesses))
+        {
+            try
+            {
+                if (process.MainWindowHandle == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                var title = process.MainWindowTitle;
+                if (!string.IsNullOrWhiteSpace(workspaceName) &&
+                    title.Contains(workspaceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return TryFocusWindowHandle(process.MainWindowHandle);
+                }
+
+                if (IsCodexDesktopWindow(process, title))
+                {
+                    return TryFocusWindowHandle(process.MainWindowHandle);
+                }
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+            {
             }
         }
 
@@ -71,8 +115,7 @@ public static class WindowFocusService
                 return false;
             }
 
-            NativeMethods.ShowWindowAsync(handle, NativeMethods.SwRestore);
-            return NativeMethods.SetForegroundWindow(handle);
+            return TryFocusWindowHandle(handle);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {
@@ -88,6 +131,33 @@ public static class WindowFocusService
         }
 
         return Path.GetFileName(workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+    }
+
+    private static IEnumerable<Process> GetUniqueProcessesByName(params string[] processNames)
+    {
+        var seen = new HashSet<int>();
+        foreach (var processName in processNames)
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                if (seen.Add(process.Id))
+                {
+                    yield return process;
+                }
+            }
+        }
+    }
+
+    private static bool TryFocusWindowHandle(IntPtr handle)
+    {
+        NativeMethods.ShowWindowAsync(handle, NativeMethods.SwRestore);
+        return NativeMethods.SetForegroundWindow(handle);
+    }
+
+    private static bool IsCodexDesktopWindow(Process process, string title)
+    {
+        return string.Equals(process.ProcessName, "Codex", StringComparison.Ordinal) ||
+            title.Contains("Codex", StringComparison.OrdinalIgnoreCase);
     }
 
     private static class NativeMethods

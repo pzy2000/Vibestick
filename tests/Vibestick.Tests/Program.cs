@@ -40,7 +40,9 @@ internal static class Program
             ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
             ("GUI control panel shows all default actions", TestGuiPanelActionsVisibleAsync),
             ("GUI Codex monitor starts by default and can be disabled", TestGuiCodexMonitorDefaultAndOptOutAsync),
-            ("Desktop pet e2e reflects state and bottom-right placement", TestDesktopPetE2EAsync),
+            ("Desktop pet e2e reflects state and bottom walking lane", TestDesktopPetE2EAsync),
+            ("Desktop pet walks along bottom lane", TestDesktopPetWalksAlongBottomLaneAsync),
+            ("Desktop pet can start with walking paused", TestDesktopPetWalkingPausedE2EAsync),
             ("Desktop pet e2e renders collapsed multi-session cards", TestDesktopPetMultiSessionE2EAsync)
         };
 
@@ -885,7 +887,7 @@ internal static class Program
         {
             var idle = await WaitForPetSnapshotAsync(directory, "idle", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
-            AssertSpritePose(idle, "seated", expectedRow: 4);
+            AssertWithinBottomWalkLane(idle);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.Reasoning, "reasoning", ttlSeconds: 60)
@@ -893,29 +895,138 @@ internal static class Program
             var reasoning = await WaitForPetSnapshotAsync(directory, "reasoning", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
             AssertDefaultPetScale(reasoning);
-            AssertNearBottomRight(reasoning);
-            AssertSpritePose(reasoning, "seated", expectedRow: 4);
+            AssertWithinBottomWalkLane(reasoning);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.ToolCalling, "tool", processId: process.Id, ttlSeconds: 60)
                 .ConfigureAwait(false);
             var toolCalling = await WaitForPetSnapshotAsync(directory, "tool_calling", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
-            AssertSpritePose(toolCalling, "seated", expectedRow: 4);
+            AssertWithinBottomWalkLane(toolCalling);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", processId: process.Id, ttlSeconds: 60)
                 .ConfigureAwait(false);
             var waitingAuthorization = await WaitForPetSnapshotAsync(directory, "waiting_authorization", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
-            AssertSpritePose(waitingAuthorization, "seated", expectedRow: 4);
+            AssertWithinBottomWalkLane(waitingAuthorization);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.Running, "running", processId: process.Id, ttlSeconds: 60)
                 .ConfigureAwait(false);
             var running = await WaitForPetSnapshotAsync(directory, "running", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
-            AssertSpritePose(running, "standing", expectedRow: 2);
+            AssertWithinBottomWalkLane(running);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task TestDesktopPetWalksAlongBottomLaneAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-e2e-walk-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var placementPath = Path.Combine(directory, "pet-window.json");
+        Directory.CreateDirectory(directory);
+        await new CoderStatusWriter(directory)
+            .EmitAsync("codex", CoderAgentPhase.Idle, "idle", ttlSeconds: 60)
+            .ConfigureAwait(false);
+
+        var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = $"\"{guiDll}\" --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI.");
+
+        try
+        {
+            var first = await WaitForWalkingSnapshotAsync(directory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            var firstLeft = first["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
+            AssertWithinBottomWalkLane(first);
+            AssertSpritePose(first, "crawling", expectedRow: 1);
+
+            var animated = await WaitForWalkingMotionSnapshotAsync(directory, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            AssertSpritePose(animated, "crawling", expectedRow: 1);
+            AssertCrawlVisualMotion(animated);
+
+            var second = await WaitForPetLeftChangeAsync(directory, firstLeft, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            AssertWithinBottomWalkLane(second);
+            AssertSpritePose(second, "crawling", expectedRow: 1);
+            var direction = second["walking"]?["direction"]?.GetValue<string>() ??
+                throw new InvalidOperationException("Snapshot missing walking direction.");
+            AssertTrue(direction is "Left" or "Right");
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task TestDesktopPetWalkingPausedE2EAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-e2e-paused-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var placementPath = Path.Combine(directory, "pet-window.json");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+                placementPath,
+                """
+                {
+                  "Left": 120,
+                  "Top": 120,
+                  "Scale": 1.0,
+                  "WalkingEnabled": false
+                }
+                """)
+            .ConfigureAwait(false);
+        await new CoderStatusWriter(directory)
+            .EmitAsync("codex", CoderAgentPhase.Idle, "idle", ttlSeconds: 60)
+            .ConfigureAwait(false);
+
+        var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = $"\"{guiDll}\" --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI.");
+
+        try
+        {
+            var first = await WaitForPetSnapshotAnyAsync(directory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            AssertEqual(false, first["walking"]?["enabled"]?.GetValue<bool>());
+            AssertWithinBottomWalkLane(first);
+            var firstLeft = first["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
+
+            await Task.Delay(TimeSpan.FromSeconds(1.2)).ConfigureAwait(false);
+            var second = await WaitForPetSnapshotAnyAsync(directory, TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            AssertEqual(false, second["walking"]?["enabled"]?.GetValue<bool>());
+            var secondLeft = second["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
+            AssertNear(firstLeft, secondLeft, 1.5, "paused pet left");
         }
         finally
         {
@@ -1315,6 +1426,102 @@ internal static class Program
         throw new TimeoutException($"Pet task cards did not reach total={total}, visible={visible}, hidden={hidden} within {timeout.TotalSeconds} seconds.");
     }
 
+    private static async Task<JsonNode> WaitForWalkingSnapshotAsync(
+        string statusDirectory,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    if (node?["walking"]?["enabled"]?.GetValue<bool>() == true &&
+                        node["walking"]?["paused"]?.GetValue<bool>() == false &&
+                        string.Equals(node["sprite"]?["pose"]?.GetValue<string>(), "crawling", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return node;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet did not start walking within {timeout.TotalSeconds} seconds.");
+    }
+
+    private static async Task<JsonNode> WaitForPetLeftChangeAsync(
+        string statusDirectory,
+        double initialLeft,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    var left = node?["left"]?.GetValue<double>() ?? initialLeft;
+                    if (Math.Abs(left - initialLeft) >= 12 &&
+                        node?["walking"]?["enabled"]?.GetValue<bool>() == true)
+                    {
+                        return node!;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(150).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet left position did not change within {timeout.TotalSeconds} seconds.");
+    }
+
+    private static async Task<JsonNode> WaitForWalkingMotionSnapshotAsync(
+        string statusDirectory,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    var sprite = node?["sprite"];
+                    var offsetX = sprite?["motionOffsetX"]?.GetValue<double>() ?? 0;
+                    var offsetY = sprite?["motionOffsetY"]?.GetValue<double>() ?? 0;
+                    if (string.Equals(sprite?["pose"]?.GetValue<string>(), "crawling", StringComparison.OrdinalIgnoreCase) &&
+                        (Math.Abs(offsetX) >= 1 || Math.Abs(offsetY) >= 1))
+                    {
+                        return node!;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet crawl motion offsets did not animate within {timeout.TotalSeconds} seconds.");
+    }
+
     private static void AssertPanelActionVisible(JsonArray buttons, string text)
     {
         var button = buttons.FirstOrDefault(node => node?["Text"]?.GetValue<string>() == text) ??
@@ -1343,6 +1550,25 @@ internal static class Program
         }
     }
 
+    private static void AssertWithinBottomWalkLane(JsonNode snapshot)
+    {
+        var left = snapshot["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
+        var top = snapshot["top"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing top.");
+        var width = snapshot["width"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing width.");
+        var walking = snapshot["walking"] ?? throw new InvalidOperationException("Snapshot missing walking state.");
+        var bounds = walking["bounds"] ?? throw new InvalidOperationException("Snapshot missing walking bounds.");
+        var boundsLeft = bounds["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing walking bounds left.");
+        var boundsRight = bounds["right"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing walking bounds right.");
+        var laneTop = walking["laneTop"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing walking lane top.");
+
+        if (left < boundsLeft - 1 || left + width > boundsRight + 1)
+        {
+            throw new InvalidOperationException($"Expected pet inside walking bounds, got left={left}, width={width}, bounds={boundsLeft}-{boundsRight}.");
+        }
+
+        AssertNear(laneTop, top, 1.5, "pet walking lane top");
+    }
+
     private static void AssertDefaultPetScale(JsonNode snapshot)
     {
         var width = snapshot["width"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing width.");
@@ -1359,6 +1585,17 @@ internal static class Program
         var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
         AssertEqual(expectedPose, sprite["pose"]?.GetValue<string>());
         AssertEqual(expectedRow, sprite["row"]?.GetValue<int>());
+    }
+
+    private static void AssertCrawlVisualMotion(JsonNode snapshot)
+    {
+        var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
+        var offsetX = sprite["motionOffsetX"]?.GetValue<double>() ?? 0;
+        var offsetY = sprite["motionOffsetY"]?.GetValue<double>() ?? 0;
+        if (Math.Abs(offsetX) < 1 && Math.Abs(offsetY) < 1)
+        {
+            throw new InvalidOperationException("Expected crawling sprite to include visible body motion offsets.");
+        }
     }
 
     private static void AssertNear(double expected, double actual, double tolerance, string name)
