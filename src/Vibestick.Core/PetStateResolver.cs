@@ -37,7 +37,7 @@ public sealed class PetStateResolver
                 : MapMood(primaryCoder.Phase);
 
         var title = GetTitle(mood, primaryCoder);
-        var message = GetMessage(mood, primaryCoder, vibestickStatus, batteryDecision);
+        var message = GetMessage(mood, primaryCoder, vibestickStatus, batteryDecision, updatedAtUtc);
 
         return new PetState(
             mood,
@@ -72,8 +72,9 @@ public sealed class PetStateResolver
             CoderAgentPhase.Success => 5,
             CoderAgentPhase.Offline => 6,
             CoderAgentPhase.Unknown => 7,
-            CoderAgentPhase.Idle => 8,
-            _ => 9
+            CoderAgentPhase.Sleeping => 8,
+            CoderAgentPhase.Idle => 9,
+            _ => 10
         };
     }
 
@@ -81,6 +82,7 @@ public sealed class PetStateResolver
     {
         return phase switch
         {
+            CoderAgentPhase.Sleeping => PetMood.Sleeping,
             CoderAgentPhase.Running => PetMood.Running,
             CoderAgentPhase.Reasoning => PetMood.Reasoning,
             CoderAgentPhase.ToolCalling => PetMood.ToolCalling,
@@ -107,6 +109,7 @@ public sealed class PetStateResolver
         var agentName = FormatAgentName(coder.Agent);
         return mood switch
         {
+            PetMood.Sleeping => $"{agentName} is sleeping",
             PetMood.Reasoning => $"{agentName} is thinking",
             PetMood.ToolCalling => $"{agentName} is using a tool",
             _ => $"{agentName}: {coder.Phase}"
@@ -117,11 +120,22 @@ public sealed class PetStateResolver
         PetMood mood,
         CoderAgentStatus? coder,
         VibestickStatus vibestickStatus,
-        BatterySafetyDecision batteryDecision)
+        BatterySafetyDecision batteryDecision,
+        DateTimeOffset now)
     {
         if (mood == PetMood.PowerWarning)
         {
             return vibestickStatus.Warnings.FirstOrDefault() ?? batteryDecision.Message;
+        }
+
+        if (mood is PetMood.Reasoning or PetMood.ToolCalling && coder is not null)
+        {
+            var baseMessage = !string.IsNullOrWhiteSpace(coder.Message)
+                ? coder.Message!
+                : mood == PetMood.Reasoning
+                    ? "The coder is thinking through the next step."
+                    : "The coder is using a tool.";
+            return $"{baseMessage.TrimEnd('.', ' ')} for {FormatElapsed(now - coder.UpdatedAtUtc)}";
         }
 
         if (!string.IsNullOrWhiteSpace(coder?.Message))
@@ -131,6 +145,7 @@ public sealed class PetStateResolver
 
         return mood switch
         {
+            PetMood.Sleeping => "No active coder task is running.",
             PetMood.Running => "A coder is running in the background.",
             PetMood.Reasoning => "The coder is thinking through the next step.",
             PetMood.ToolCalling => "The coder is using a tool.",
@@ -140,6 +155,24 @@ public sealed class PetStateResolver
             PetMood.Offline => "The coder appears offline.",
             _ => "No active coder state is available."
         };
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        var totalSeconds = Math.Max(0, (int)Math.Floor(elapsed.TotalSeconds));
+        if (totalSeconds < 60)
+        {
+            return $"{totalSeconds}s";
+        }
+
+        var minutes = totalSeconds / 60;
+        var seconds = totalSeconds % 60;
+        return $"{minutes}m{seconds:00}s";
     }
 
     private static string FormatAgentName(string agent)

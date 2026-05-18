@@ -85,6 +85,7 @@ public sealed class PetSpriteAnimator
     {
         return mood switch
         {
+            PetMood.Sleeping => (2 + frameIndex, 5),
             PetMood.Running => (frameIndex, 1),
             PetMood.Reasoning => (4 + frameIndex, 7),
             PetMood.ToolCalling => (frameIndex, 1),

@@ -74,7 +74,7 @@ Manual adapter commands remain useful for testing and non-Codex integrations:
 .\scripts\vibestick.ps1 coder clear --agent codex --json
 ```
 
-Supported coder phases are `idle`, `running`, `reasoning`, `tool_calling`, `waiting_authorization`, `error`, `success`, `offline`, and `unknown`. The pet maps them to its mascot moods, with power and battery safety warnings overriding coder animation only when they need attention.
+Supported coder phases are `idle`, `sleeping`, `running`, `reasoning`, `tool_calling`, `waiting_authorization`, `error`, `success`, `offline`, and `unknown`. The pet maps them to its mascot moods, with power and battery safety warnings overriding coder animation only when they need attention.
 
 ## State
 

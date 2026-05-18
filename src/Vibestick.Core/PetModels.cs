@@ -3,6 +3,7 @@ namespace Vibestick.Core;
 public enum CoderAgentPhase
 {
     Idle,
+    Sleeping,
     Running,
     Reasoning,
     ToolCalling,
@@ -25,6 +26,7 @@ public sealed record CoderAgentStatus(
 public enum PetMood
 {
     Idle,
+    Sleeping,
     Running,
     Reasoning,
     ToolCalling,

@@ -23,12 +23,15 @@ internal static class Program
             ("Codex session bridge tails newest rollout", TestCodexSessionStatusBridgeAsync),
             ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
             ("Pet resolver maps tool calling mood", TestPetResolverToolCallingAsync),
+            ("Pet resolver displays elapsed active coder time", TestPetResolverActiveElapsedTimeAsync),
+            ("Pet resolver maps sleeping mood", TestPetResolverSleepingAsync),
             ("Pet resolver prioritizes tool calling over reasoning and running", TestPetResolverToolCallingPriorityAsync),
             ("Pet resolver falls back to idle without coders", TestPetResolverIdleFallbackAsync),
             ("Pet resolver lets critical power override coder mood", TestPetResolverPowerOverrideAsync),
             ("Pet resolver rotates charging power and full-time badge", TestPetResolverChargingBadgeRotationAsync),
             ("Pet resolver falls back to AC badge when charging estimate is missing", TestPetResolverChargingBadgeFallbackAsync),
             ("Composite coder source prefers adapter status over process fallback", TestCompositeCoderSourceAsync),
+            ("Process coder source treats idle Codex as sleeping", TestProcessCoderSourceCodexSleepingAsync),
             ("CLI coder emit, pet status, and clear smoke", TestCliCoderStatusSmokeAsync),
             ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
             ("GUI Codex monitor starts by default and can be disabled", TestGuiCodexMonitorDefaultAndOptOutAsync),
@@ -331,7 +334,40 @@ internal static class Program
 
         AssertEqual(PetMood.ToolCalling, state.Mood);
         AssertEqual("Codex is using a tool", state.Title);
-        AssertEqual("The coder is using a tool.", state.Message);
+        AssertTrue(state.Message.StartsWith("The coder is using a tool for ", StringComparison.Ordinal));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverActiveElapsedTimeAsync()
+    {
+        var now = DateTimeOffset.Parse("2026-05-18T10:00:42Z");
+        var reasoningState = new PetStateResolver().Resolve(
+            CreateStatus(),
+            new[] { CreateCoder("codex", CoderAgentPhase.Reasoning, "Reading files", updatedAtUtc: now.AddSeconds(-12)) },
+            isHyperGuardRunning: false,
+            now);
+        var toolState = new PetStateResolver().Resolve(
+            CreateStatus(),
+            new[] { CreateCoder("codex", CoderAgentPhase.ToolCalling, "Running rg", updatedAtUtc: now.AddSeconds(-75)) },
+            isHyperGuardRunning: false,
+            now);
+
+        AssertEqual("Reading files for 12s", reasoningState.Message);
+        AssertEqual("Running rg for 1m15s", toolState.Message);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverSleepingAsync()
+    {
+        var state = new PetStateResolver().Resolve(
+            CreateStatus(),
+            new[] { CreateCoder("codex", CoderAgentPhase.Sleeping, "No active Codex task is running.") },
+            isHyperGuardRunning: false,
+            DateTimeOffset.UtcNow);
+
+        AssertEqual(PetMood.Sleeping, state.Mood);
+        AssertEqual("Codex is sleeping", state.Title);
+        AssertEqual("No active Codex task is running.", state.Message);
         return Task.CompletedTask;
     }
 
@@ -351,7 +387,7 @@ internal static class Program
 
         AssertEqual(PetMood.ToolCalling, state.Mood);
         AssertEqual(CoderAgentPhase.ToolCalling, state.PrimaryCoder?.Phase);
-        AssertEqual("Running rg", state.Message);
+        AssertEqual("Running rg for 0s", state.Message);
         return Task.CompletedTask;
     }
 
@@ -453,6 +489,27 @@ internal static class Program
         var statuses = composite.GetStatuses(now);
         AssertEqual(1, statuses.Count);
         AssertEqual(CoderAgentPhase.Idle, statuses[0].Phase);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestProcessCoderSourceCodexSleepingAsync()
+    {
+        var now = DateTimeOffset.Parse("2026-05-18T10:00:00Z");
+        var source = new ProcessCoderStatusSource(
+            new StaticProcessInspector(new[]
+            {
+                new LongTaskProcess(123, "codex"),
+                new LongTaskProcess(456, "node")
+            }),
+            new[] { "codex", "node" });
+
+        var statuses = source.GetStatuses(now);
+        var codex = statuses.First(static status => status.Agent == "codex");
+        var node = statuses.First(static status => status.Agent == "node");
+
+        AssertEqual(CoderAgentPhase.Sleeping, codex.Phase);
+        AssertEqual("No active Codex task is running.", codex.Message);
+        AssertEqual(CoderAgentPhase.Running, node.Phase);
         return Task.CompletedTask;
     }
 

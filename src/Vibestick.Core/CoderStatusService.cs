@@ -202,13 +202,18 @@ public sealed class ProcessCoderStatusSource : ICoderStatusSource
         return _processInspector.GetLongTasks(_processNames)
             .Select(task => new CoderAgentStatus(
                 task.Name,
-                CoderAgentPhase.Running,
-                "Detected running coder process.",
+                IsCodexProcess(task.Name) ? CoderAgentPhase.Sleeping : CoderAgentPhase.Running,
+                IsCodexProcess(task.Name) ? "No active Codex task is running." : "Detected running coder process.",
                 Workspace: null,
                 task.ProcessId,
                 now,
                 TtlSeconds: null))
             .ToArray();
+    }
+
+    private static bool IsCodexProcess(string processName)
+    {
+        return string.Equals(processName, "codex", StringComparison.OrdinalIgnoreCase);
     }
 }
 
