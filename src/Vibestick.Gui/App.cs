@@ -5,17 +5,155 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Vibestick.Core;
+using Application = System.Windows.Application;
+using Button = System.Windows.Controls.Button;
+using Brushes = System.Windows.Media.Brushes;
+using Color = System.Windows.Media.Color;
+using ColorConverter = System.Windows.Media.ColorConverter;
+using Drawing = System.Drawing;
+using FontFamily = System.Windows.Media.FontFamily;
+using Forms = System.Windows.Forms;
+using ListBox = System.Windows.Controls.ListBox;
+using MessageBox = System.Windows.MessageBox;
+using Panel = System.Windows.Controls.Panel;
+using TextBox = System.Windows.Controls.TextBox;
 
 namespace Vibestick.Gui;
 
 public sealed class App : Application
 {
-    [STAThread]
-    public static int Main()
+    private readonly string[] _args;
+    private GuiServices? _services;
+    private GuiRuntimeState? _runtimeState;
+    private PetWindow? _petWindow;
+    private MainWindow? _mainWindow;
+    private Forms.NotifyIcon? _notifyIcon;
+    private string? _placementPath;
+
+    public App(string[] args)
     {
-        var app = new App();
-        app.Run(new MainWindow());
-        return 0;
+        _args = args;
+    }
+
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        var app = new App(args);
+        return app.Run();
+    }
+
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        base.OnStartup(e);
+
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        var statusDirectory = GetOption(_args, "--status-dir") ??
+            Environment.GetEnvironmentVariable("VIBESTICK_CODER_STATUS_DIR");
+        _placementPath = GetOption(_args, "--placement-path");
+        _services = GuiServiceFactory.Create(statusDirectory);
+        _runtimeState = new GuiRuntimeState();
+
+        CreateTrayIcon();
+
+        if (HasFlag(_args, "--panel"))
+        {
+            ShowControlPanel();
+        }
+        else
+        {
+            ShowPet();
+        }
+
+        if (HasFlag(_args, "--smoke"))
+        {
+            var smokeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            smokeTimer.Tick += (_, _) =>
+            {
+                smokeTimer.Stop();
+                Shutdown(0);
+            };
+            smokeTimer.Start();
+        }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _notifyIcon?.Dispose();
+        base.OnExit(e);
+    }
+
+    private void ShowPet()
+    {
+        if (_services is null || _runtimeState is null)
+        {
+            return;
+        }
+
+        if (_petWindow is { IsVisible: true })
+        {
+            _petWindow.Activate();
+            return;
+        }
+
+        _petWindow = new PetWindow(
+            _services,
+            _runtimeState,
+            ShowControlPanel,
+            () => Shutdown(0),
+            new PetWindowStateStore(_placementPath));
+        _petWindow.Show();
+    }
+
+    private void ShowControlPanel()
+    {
+        if (_services is null || _runtimeState is null)
+        {
+            return;
+        }
+
+        if (_mainWindow is { IsVisible: true })
+        {
+            _mainWindow.Activate();
+            return;
+        }
+
+        _mainWindow = new MainWindow(_services, _runtimeState);
+        _mainWindow.Closed += (_, _) => _mainWindow = null;
+        _mainWindow.Show();
+    }
+
+    private void CreateTrayIcon()
+    {
+        _notifyIcon = new Forms.NotifyIcon
+        {
+            Icon = Drawing.SystemIcons.Application,
+            Text = "Vibestick",
+            Visible = true,
+            ContextMenuStrip = new Forms.ContextMenuStrip()
+        };
+
+        _notifyIcon.ContextMenuStrip.Items.Add("Open Control Panel", null, (_, _) => Dispatcher.Invoke(ShowControlPanel));
+        _notifyIcon.ContextMenuStrip.Items.Add("Show Pet", null, (_, _) => Dispatcher.Invoke(ShowPet));
+        _notifyIcon.ContextMenuStrip.Items.Add("Exit Vibestick", null, (_, _) => Dispatcher.Invoke(() => Shutdown(0)));
+        _notifyIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowControlPanel);
+    }
+
+    private static bool HasFlag(string[] args, string flag)
+    {
+        return args.Any(arg => string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? GetOption(string[] args, string option)
+    {
+        for (var index = 0; index < args.Length - 1; index++)
+        {
+            if (string.Equals(args[index], option, StringComparison.OrdinalIgnoreCase))
+            {
+                return args[index + 1];
+            }
+        }
+
+        return null;
     }
 }
 
@@ -27,7 +165,8 @@ public sealed class MainWindow : Window
         Converters = { new JsonStringEnumConverter() }
     };
 
-    private readonly Services _services;
+    private readonly GuiServices _services;
+    private readonly GuiRuntimeState _runtimeState;
     private readonly DispatcherTimer _hyperTimer;
     private IDisposable? _sleepBlock;
 
@@ -47,9 +186,10 @@ public sealed class MainWindow : Window
     private readonly Button _stopHyperButton = new();
     private readonly Button _revertButton = new();
 
-    public MainWindow()
+    public MainWindow(GuiServices services, GuiRuntimeState runtimeState)
     {
-        _services = CreateServices();
+        _services = services;
+        _runtimeState = runtimeState;
         _hyperTimer = new DispatcherTimer
         {
             Interval = _services.Options.HyperGuardInterval
@@ -316,6 +456,7 @@ public sealed class MainWindow : Window
     {
         StopHyperGuardOnly();
         _sleepBlock = _services.SleepBlocker.BlockSystemSleep();
+        _runtimeState.IsHyperGuardRunning = true;
         _hyperTimer.Start();
         SetGuardUi();
         AppendLog("HYPER guard started. Idle system sleep is blocked while this window stays open.");
@@ -337,6 +478,7 @@ public sealed class MainWindow : Window
         _hyperTimer.Stop();
         _sleepBlock?.Dispose();
         _sleepBlock = null;
+        _runtimeState.IsHyperGuardRunning = false;
         SetGuardUi();
     }
 
@@ -478,28 +620,4 @@ public sealed class MainWindow : Window
     {
         return new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
     }
-
-    private static Services CreateServices()
-    {
-        var options = new VibestickOptions();
-        var commandRunner = new ProcessCommandRunner();
-        var powerPolicy = new PowerCfgPowerPolicyManager(commandRunner);
-        var stateStore = new JsonFileStateStore();
-        var batteryMonitor = new WindowsBatteryMonitor();
-        var processInspector = new WindowsProcessInspector();
-        var engine = new VibestickEngine(powerPolicy, stateStore, batteryMonitor, processInspector, options);
-        var doctor = new DoctorService(powerPolicy, stateStore, batteryMonitor, processInspector, options);
-        var sleepBlocker = new WindowsSleepBlocker();
-
-        return new Services(engine, doctor, batteryMonitor, processInspector, sleepBlocker, options);
-    }
-
-    private sealed record Services(
-        VibestickEngine Engine,
-        DoctorService Doctor,
-        IBatteryMonitor BatteryMonitor,
-        IProcessInspector ProcessInspector,
-        ISleepBlocker SleepBlocker,
-        VibestickOptions Options);
 }
-

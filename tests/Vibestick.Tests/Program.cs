@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text.Json.Nodes;
 using Vibestick.Core;
 
 namespace Vibestick.Tests;
@@ -15,7 +17,15 @@ internal static class Program
             ("HYPER downgrades to ON below battery downgrade threshold", TestHyperDowngradesOnLowBatteryAsync),
             ("HYPER restores normal sleep below critical battery threshold", TestHyperRestoresOnCriticalBatteryAsync),
             ("Long task detector matches normalized process names", TestLongTaskDetectorAsync),
-            ("Json state store recovers from corrupted state", TestCorruptedStateRecoveryAsync)
+            ("Json state store recovers from corrupted state", TestCorruptedStateRecoveryAsync),
+            ("Coder status adapter parses snake case and ignores stale entries", TestCoderStatusAdapterAsync),
+            ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
+            ("Pet resolver falls back to idle without coders", TestPetResolverIdleFallbackAsync),
+            ("Pet resolver lets critical power override coder mood", TestPetResolverPowerOverrideAsync),
+            ("Composite coder source prefers adapter status over process fallback", TestCompositeCoderSourceAsync),
+            ("CLI coder emit, pet status, and clear smoke", TestCliCoderStatusSmokeAsync),
+            ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
+            ("Desktop pet e2e reflects state and bottom-right placement", TestDesktopPetE2EAsync)
         };
 
         var failed = 0;
@@ -169,6 +179,210 @@ internal static class Program
         Directory.Delete(directory, recursive: true);
     }
 
+    private static Task TestCoderStatusAdapterAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-coder-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var now = DateTimeOffset.Parse("2026-05-18T10:00:00Z");
+
+        File.WriteAllText(
+            Path.Combine(directory, "codex.json"),
+            """
+            {
+              "agent": "codex",
+              "phase": "waiting_authorization",
+              "message": "Approval needed",
+              "workspace": "C:\\repo",
+              "processId": 123,
+              "updatedAtUtc": "2026-05-18T09:59:30Z",
+              "ttlSeconds": 120
+            }
+            """);
+
+        File.WriteAllText(
+            Path.Combine(directory, "old.json"),
+            """
+            {
+              "agent": "old",
+              "phase": "error",
+              "updatedAtUtc": "2026-05-18T09:00:00Z",
+              "ttlSeconds": 10
+            }
+            """);
+
+        var statuses = new JsonFileCoderStatusSource(directory).GetStatuses(now);
+        AssertEqual(1, statuses.Count);
+        AssertEqual("codex", statuses[0].Agent);
+        AssertEqual(CoderAgentPhase.WaitingAuthorization, statuses[0].Phase);
+        AssertEqual("Approval needed", statuses[0].Message);
+
+        Directory.Delete(directory, recursive: true);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverPhasePriorityAsync()
+    {
+        var resolver = new PetStateResolver();
+        var state = resolver.Resolve(
+            CreateStatus(),
+            new[]
+            {
+                CreateCoder("codex", CoderAgentPhase.Running),
+                CreateCoder("claude", CoderAgentPhase.Error, "Build failed")
+            },
+            isHyperGuardRunning: false,
+            DateTimeOffset.UtcNow);
+
+        AssertEqual(PetMood.Error, state.Mood);
+        AssertEqual("claude", state.PrimaryCoder?.Agent);
+        AssertEqual("Build failed", state.Message);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverIdleFallbackAsync()
+    {
+        var state = new PetStateResolver().Resolve(
+            CreateStatus(),
+            Array.Empty<CoderAgentStatus>(),
+            isHyperGuardRunning: false,
+            DateTimeOffset.UtcNow);
+
+        AssertEqual(PetMood.Idle, state.Mood);
+        AssertEqual(0, state.Coders.Count);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverPowerOverrideAsync()
+    {
+        var status = CreateStatus(
+            mode: VibestickMode.Hyper,
+            battery: new BatteryInfo(15, IsAcConnected: false, IsAvailable: true));
+        var state = new PetStateResolver().Resolve(
+            status,
+            new[] { CreateCoder("codex", CoderAgentPhase.Reasoning) },
+            isHyperGuardRunning: true,
+            DateTimeOffset.UtcNow);
+
+        AssertEqual(PetMood.PowerWarning, state.Mood);
+        AssertTrue(state.Badges.Any(static badge => badge.Kind == PetBadgeKind.Guard));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestCompositeCoderSourceAsync()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var composite = new CompositeCoderStatusSource(
+            new StaticCoderStatusSource(new[] { CreateCoder("codex", CoderAgentPhase.Idle, updatedAtUtc: now) }),
+            new StaticCoderStatusSource(new[] { CreateCoder("codex", CoderAgentPhase.Running, updatedAtUtc: now.AddSeconds(1)) }));
+
+        var statuses = composite.GetStatuses(now);
+        AssertEqual(1, statuses.Count);
+        AssertEqual(CoderAgentPhase.Idle, statuses[0].Phase);
+        return Task.CompletedTask;
+    }
+
+    private static async Task TestCliCoderStatusSmokeAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-cli-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        var emit = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase reasoning --message \"thinking\" --ttl 60 --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, emit.ExitCode);
+
+        var status = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- pet status --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, status.ExitCode);
+        var json = JsonNode.Parse(status.StandardOutput) ?? throw new InvalidOperationException("Expected pet status JSON.");
+        AssertEqual("reasoning", json["pet"]?["mood"]?.GetValue<string>());
+
+        var clear = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- coder clear --agent codex --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, clear.ExitCode);
+        var clearJson = JsonNode.Parse(clear.StandardOutput) ?? throw new InvalidOperationException("Expected clear JSON.");
+        AssertEqual(1, clearJson["deleted"]?.GetValue<int>());
+
+        Directory.Delete(directory, recursive: true);
+    }
+
+    private static async Task TestGuiPetSmokeAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-gui-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var publishDirectory = Path.Combine(directory, "publish");
+
+        try
+        {
+            var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+            var result = await RunProcessAsync(
+                    GetDotnetPath(),
+                    $"\"{guiDll}\" --smoke --status-dir \"{directory}\" --placement-path \"{Path.Combine(directory, "placement.json")}\"",
+                    repoRoot,
+                    TimeSpan.FromSeconds(20))
+                .ConfigureAwait(false);
+            AssertEqual(0, result.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task TestDesktopPetE2EAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-e2e-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var placementPath = Path.Combine(directory, "pet-window.json");
+        Directory.CreateDirectory(directory);
+
+        await new CoderStatusWriter(directory)
+            .EmitAsync("codex", CoderAgentPhase.Reasoning, "reasoning", ttlSeconds: 60)
+            .ConfigureAwait(false);
+
+        var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = $"\"{guiDll}\" --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI.");
+
+        try
+        {
+            var reasoning = await WaitForPetSnapshotAsync(directory, "reasoning", TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
+            AssertNearBottomRight(reasoning);
+
+            await new CoderStatusWriter(directory)
+                .EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", processId: process.Id, ttlSeconds: 60)
+                .ConfigureAwait(false);
+            await WaitForPetSnapshotAsync(directory, "waiting_authorization", TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static VibestickEngine CreateEngine(
         IPowerPolicyManager policy,
         IStateStore store,
@@ -179,6 +393,221 @@ internal static class Program
             store,
             new StaticBatteryMonitor(battery),
             new StaticProcessInspector(Array.Empty<LongTaskProcess>()));
+    }
+
+    private static VibestickStatus CreateStatus(
+        VibestickMode mode = VibestickMode.On,
+        BatteryInfo? battery = null,
+        IReadOnlyList<string>? warnings = null)
+    {
+        return new VibestickStatus(
+            mode,
+            RestorePending: mode != VibestickMode.Off,
+            LastAppliedSchemeGuid: "scheme-a",
+            OriginalPolicy: null,
+            CurrentSchemeGuid: "scheme-a",
+            CurrentPolicy: new PowerPolicySnapshot("scheme-a", 0, 0),
+            battery ?? new BatteryInfo(90, IsAcConnected: true, IsAvailable: true),
+            Array.Empty<LongTaskProcess>(),
+            warnings ?? Array.Empty<string>());
+    }
+
+    private static CoderAgentStatus CreateCoder(
+        string agent,
+        CoderAgentPhase phase,
+        string? message = null,
+        DateTimeOffset? updatedAtUtc = null)
+    {
+        return new CoderAgentStatus(
+            agent,
+            phase,
+            message,
+            Workspace: null,
+            ProcessId: null,
+            updatedAtUtc ?? DateTimeOffset.UtcNow,
+            TtlSeconds: 120);
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Vibestick.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new InvalidOperationException("Could not locate Vibestick.sln.");
+    }
+
+    private static string GetDotnetPath()
+    {
+        var localDotnet = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotnet",
+            "dotnet.exe");
+        return File.Exists(localDotnet) ? localDotnet : "dotnet";
+    }
+
+    private static Task<CommandResult> RunDotnetAsync(string workingDirectory, string arguments)
+    {
+        return RunDotnetAsync(workingDirectory, arguments, TimeSpan.FromSeconds(60));
+    }
+
+    private static async Task<CommandResult> RunDotnetAsync(
+        string workingDirectory,
+        string arguments,
+        TimeSpan timeout)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = arguments,
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dotnet.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.WaitForExitAsync(timeoutSource.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            throw new TimeoutException($"dotnet {arguments} did not exit within {timeout.TotalSeconds} seconds.");
+        }
+
+        var output = await outputTask.ConfigureAwait(false);
+        var error = await errorTask.ConfigureAwait(false);
+        return new CommandResult(process.ExitCode, output, error);
+    }
+
+    private static async Task<string> PublishGuiForSmokeAsync(string repoRoot, string publishDirectory)
+    {
+        var appDirectory = Path.Combine(publishDirectory, "app");
+        var binDirectory = Path.Combine(publishDirectory, "bin");
+        var objDirectory = Path.Combine(publishDirectory, "obj");
+        var binPath = binDirectory.Replace('\\', '/') + "/";
+        var objPath = objDirectory.Replace('\\', '/') + "/";
+        var result = await RunDotnetAsync(
+                repoRoot,
+                $"publish src\\Vibestick.Gui --configuration Release --no-restore --no-dependencies -p:UseAppHost=false -p:OutputPath=\"{binPath}\" -p:IntermediateOutputPath=\"{objPath}\" --output \"{appDirectory}\"",
+                TimeSpan.FromSeconds(60))
+            .ConfigureAwait(false);
+        AssertEqual(0, result.ExitCode);
+
+        var dll = Path.Combine(appDirectory, "vibestick-gui.dll");
+        if (!File.Exists(dll))
+        {
+            throw new InvalidOperationException($"Expected published GUI assembly at {dll}.");
+        }
+
+        return dll;
+    }
+
+    private static async Task<CommandResult> RunProcessAsync(
+        string fileName,
+        string arguments,
+        string workingDirectory,
+        TimeSpan timeout)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            Arguments = arguments,
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.WaitForExitAsync(timeoutSource.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            throw new TimeoutException($"{fileName} {arguments} did not exit within {timeout.TotalSeconds} seconds.");
+        }
+
+        return new CommandResult(
+            process.ExitCode,
+            await outputTask.ConfigureAwait(false),
+            await errorTask.ConfigureAwait(false));
+    }
+
+    private static async Task<JsonNode> WaitForPetSnapshotAsync(
+        string statusDirectory,
+        string expectedMood,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    if (string.Equals(node?["mood"]?.GetValue<string>(), expectedMood, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return node!;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(250).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet snapshot did not reach mood '{expectedMood}' within {timeout.TotalSeconds} seconds.");
+    }
+
+    private static void AssertNearBottomRight(JsonNode snapshot)
+    {
+        var left = snapshot["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
+        var top = snapshot["top"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing top.");
+        var width = snapshot["width"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing width.");
+        var height = snapshot["height"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing height.");
+
+        var rightGap = Math.Abs((NativeMethods.GetSystemMetric(NativeMethods.SmXVirtualScreen) +
+            NativeMethods.GetSystemMetric(NativeMethods.SmCxVirtualScreen)) - (left + width));
+        var bottomGap = Math.Abs((NativeMethods.GetSystemMetric(NativeMethods.SmYVirtualScreen) +
+            NativeMethods.GetSystemMetric(NativeMethods.SmCyVirtualScreen)) - (top + height));
+
+        if (rightGap > 320 || bottomGap > 320)
+        {
+            throw new InvalidOperationException($"Expected pet near bottom-right, got left={left}, top={top}, width={width}, height={height}.");
+        }
     }
 
     private static async Task AssertThrowsAsync<TException>(Func<Task> action)
@@ -355,5 +784,29 @@ internal static class Program
 
         public IReadOnlyList<LongTaskProcess> GetLongTasks(IReadOnlyList<string> whitelist) => _tasks;
     }
-}
 
+    private sealed class StaticCoderStatusSource : ICoderStatusSource
+    {
+        private readonly IReadOnlyList<CoderAgentStatus> _statuses;
+
+        public StaticCoderStatusSource(IReadOnlyList<CoderAgentStatus> statuses)
+        {
+            _statuses = statuses;
+        }
+
+        public IReadOnlyList<CoderAgentStatus> GetStatuses(DateTimeOffset now) => _statuses;
+    }
+
+    private static class NativeMethods
+    {
+        public const int SmXVirtualScreen = 76;
+        public const int SmYVirtualScreen = 77;
+        public const int SmCxVirtualScreen = 78;
+        public const int SmCyVirtualScreen = 79;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern int GetSystemMetrics(int nIndex);
+
+        public static int GetSystemMetric(int index) => GetSystemMetrics(index);
+    }
+}

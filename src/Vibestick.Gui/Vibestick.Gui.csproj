@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>vibestick-gui</AssemblyName>
@@ -12,5 +13,9 @@
   <ItemGroup>
     <ProjectReference Include="..\Vibestick.Core\Vibestick.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\PetSprites\golden-shaded-cat-spritesheet.cleaned.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 </Project>
-

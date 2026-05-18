@@ -39,13 +39,34 @@ On this machine the SDK was installed with `dotnet-install` under `%USERPROFILE%
 
 ## GUI
 
-The GUI wraps the same core functions as the CLI:
+The GUI starts as a desktop pet by default. It appears near the bottom-right of the virtual desktop, stays on top, can be dragged, and opens the existing control panel when clicked:
 
 ```powershell
 .\scripts\vibestick-gui.ps1
 ```
 
-The window exposes status refresh, diagnostics, ON, HYPER, Stop HYPER Guard, and OFF/Revert controls. HYPER in the GUI keeps a sleep blocker active while the window remains open or until you stop the guard.
+Right-click the pet or tray icon for the control panel and exit actions. The control panel still exposes status refresh, diagnostics, ON, HYPER, Stop HYPER Guard, and OFF/Revert controls. HYPER in the GUI keeps a sleep blocker active while the control panel remains open or until you stop the guard.
+
+## Desktop Pet Coder Status
+
+Vibestick reads precise vibe-coder state from local adapter files under:
+
+```text
+%LOCALAPPDATA%\Vibestick\coder-status\*.json
+```
+
+When no adapter state exists, Vibestick falls back to whitelisted process detection for tools such as Codex, Claude, node, Python, Docker, and similar long-running coder tasks.
+
+Useful integration commands:
+
+```powershell
+.\scripts\vibestick.ps1 pet status --json
+.\scripts\vibestick.ps1 coder emit --agent codex --phase reasoning --message "Thinking through the patch" --ttl 120 --json
+.\scripts\vibestick.ps1 coder emit --agent codex --phase waiting_authorization --message "Approval needed" --ttl 120 --json
+.\scripts\vibestick.ps1 coder clear --agent codex --json
+```
+
+Supported coder phases are `idle`, `running`, `reasoning`, `waiting_authorization`, `error`, `success`, `offline`, and `unknown`. The pet maps them to its mascot moods, with power and battery safety warnings overriding coder animation only when they need attention.
 
 ## State
 

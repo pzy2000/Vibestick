@@ -12,6 +12,13 @@ internal static class Program
         Converters = { new JsonStringEnumConverter() }
     };
 
+    private static readonly JsonSerializerOptions PetJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
+    };
+
     public static async Task<int> Main(string[] args)
     {
         var json = HasFlag(args, "--json");
@@ -24,7 +31,7 @@ internal static class Program
                 return 0;
             }
 
-            var services = CreateServices();
+            var services = CreateServices(GetOption(args, "--status-dir"));
             var command = args[0].ToLowerInvariant();
 
             return command switch
@@ -33,6 +40,8 @@ internal static class Program
                 "doctor" => await RunDoctorAsync(services.Doctor, json).ConfigureAwait(false),
                 "revert" => await RunRevertAsync(services.Engine, json).ConfigureAwait(false),
                 "mode" => await RunModeAsync(args, services, json).ConfigureAwait(false),
+                "pet" => await RunPetAsync(args, services, json).ConfigureAwait(false),
+                "coder" => await RunCoderAsync(args, services, json).ConfigureAwait(false),
                 _ => UnknownCommand(command)
             };
         }
@@ -51,7 +60,7 @@ internal static class Program
         }
     }
 
-    private static Services CreateServices()
+    private static Services CreateServices(string? coderStatusDirectory = null)
     {
         var options = new VibestickOptions();
         var commandRunner = new ProcessCommandRunner();
@@ -62,8 +71,22 @@ internal static class Program
         var engine = new VibestickEngine(powerPolicy, stateStore, batteryMonitor, processInspector, options);
         var doctor = new DoctorService(powerPolicy, stateStore, batteryMonitor, processInspector, options);
         var sleepBlocker = new WindowsSleepBlocker();
+        var coderStatusSource = new CompositeCoderStatusSource(
+            new JsonFileCoderStatusSource(coderStatusDirectory),
+            new ProcessCoderStatusSource(processInspector, options.LongTaskProcessNames));
+        var coderStatusWriter = new CoderStatusWriter(coderStatusDirectory);
+        var petStateResolver = new PetStateResolver(options);
 
-        return new Services(engine, doctor, batteryMonitor, processInspector, sleepBlocker, options);
+        return new Services(
+            engine,
+            doctor,
+            batteryMonitor,
+            processInspector,
+            sleepBlocker,
+            options,
+            coderStatusSource,
+            coderStatusWriter,
+            petStateResolver);
     }
 
     private static async Task<int> RunStatusAsync(VibestickEngine engine, bool json)
@@ -129,6 +152,113 @@ internal static class Program
         if (mode == VibestickMode.Hyper && once && !json)
         {
             Console.WriteLine("HYPER was applied once. Idle sleep is not blocked after this process exits.");
+        }
+
+        return 0;
+    }
+
+    private static async Task<int> RunPetAsync(string[] args, Services services, bool json)
+    {
+        if (args.Length < 2 || !string.Equals(args[1], "status", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("Missing pet command. Expected: pet status [--json].");
+            return 1;
+        }
+
+        var status = await services.Engine.GetStatusAsync().ConfigureAwait(false);
+        var coders = services.CoderStatusSource.GetStatuses(DateTimeOffset.UtcNow);
+        var petState = services.PetStateResolver.Resolve(
+            status,
+            coders,
+            isHyperGuardRunning: false,
+            DateTimeOffset.UtcNow);
+
+        if (json)
+        {
+            WritePetJson(new
+            {
+                ok = true,
+                statusDirectory = services.CoderStatusWriter.DirectoryPath,
+                pet = petState
+            });
+        }
+        else
+        {
+            Console.WriteLine("Vibestick pet");
+            Console.WriteLine($"Mood:      {petState.Mood}");
+            Console.WriteLine($"Title:     {petState.Title}");
+            Console.WriteLine($"Message:   {petState.Message}");
+            Console.WriteLine($"Coders:    {(petState.Coders.Count == 0 ? "-" : string.Join(", ", petState.Coders.Select(static status => $"{status.Agent}:{status.Phase}")))}");
+            Console.WriteLine($"Badges:    {(petState.Badges.Count == 0 ? "-" : string.Join(", ", petState.Badges.Select(static badge => badge.Text)))}");
+        }
+
+        return 0;
+    }
+
+    private static async Task<int> RunCoderAsync(string[] args, Services services, bool json)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Missing coder command. Expected: coder emit|clear.");
+            return 1;
+        }
+
+        var command = args[1].ToLowerInvariant();
+        if (command == "emit")
+        {
+            return await RunCoderEmitAsync(args, services, json).ConfigureAwait(false);
+        }
+
+        if (command == "clear")
+        {
+            var agent = GetOption(args, "--agent");
+            var deleted = services.CoderStatusWriter.Clear(agent);
+            if (json)
+            {
+                WritePetJson(new { ok = true, deleted, statusDirectory = services.CoderStatusWriter.DirectoryPath });
+            }
+            else
+            {
+                Console.WriteLine(agent is null
+                    ? $"Cleared {deleted} coder status file(s)."
+                    : $"Cleared {deleted} status file(s) for {agent}.");
+            }
+
+            return 0;
+        }
+
+        Console.Error.WriteLine($"Unknown coder command '{command}'. Expected: emit, clear.");
+        return 1;
+    }
+
+    private static async Task<int> RunCoderEmitAsync(string[] args, Services services, bool json)
+    {
+        var agent = GetOption(args, "--agent") ?? "codex";
+        var phaseValue = GetOption(args, "--phase");
+        if (phaseValue is null || !TryParseCoderPhase(phaseValue, out var phase))
+        {
+            Console.Error.WriteLine("Missing or invalid --phase. Expected: idle, running, reasoning, waiting_authorization, error, success, offline, unknown.");
+            return 1;
+        }
+
+        var processId = TryGetIntOption(args, "--pid");
+        var ttlSeconds = TryGetIntOption(args, "--ttl");
+        var status = await services.CoderStatusWriter.EmitAsync(
+                agent,
+                phase,
+                GetOption(args, "--message"),
+                GetOption(args, "--workspace"),
+                processId,
+                ttlSeconds)
+            .ConfigureAwait(false);
+
+        if (json)
+        {
+            WritePetJson(new { ok = true, statusDirectory = services.CoderStatusWriter.DirectoryPath, status });
+        }
+        else
+        {
+            Console.WriteLine($"Emitted {status.Agent}:{status.Phase} to {services.CoderStatusWriter.DirectoryPath}.");
         }
 
         return 0;
@@ -251,6 +381,9 @@ internal static class Program
         Console.WriteLine("  vibestick doctor [--json]");
         Console.WriteLine("  vibestick mode off|on|hyper [--json] [--once]");
         Console.WriteLine("  vibestick revert [--json]");
+        Console.WriteLine("  vibestick pet status [--json] [--status-dir <path>]");
+        Console.WriteLine("  vibestick coder emit --phase <phase> [--agent <name>] [--message <text>] [--workspace <path>] [--pid <id>] [--ttl <seconds>] [--json] [--status-dir <path>]");
+        Console.WriteLine("  vibestick coder clear [--agent <name>] [--json] [--status-dir <path>]");
         Console.WriteLine();
         Console.WriteLine("Notes:");
         Console.WriteLine("  mode hyper runs a foreground guard by default. Use --once to apply policy and exit.");
@@ -287,9 +420,55 @@ internal static class Program
         return args.Any(arg => string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static string? GetOption(string[] args, string option)
+    {
+        for (var index = 0; index < args.Length - 1; index++)
+        {
+            if (string.Equals(args[index], option, StringComparison.OrdinalIgnoreCase))
+            {
+                return args[index + 1];
+            }
+        }
+
+        return null;
+    }
+
+    private static int? TryGetIntOption(string[] args, string option)
+    {
+        var value = GetOption(args, option);
+        return int.TryParse(value, out var parsed) ? parsed : null;
+    }
+
+    private static bool TryParseCoderPhase(string value, out CoderAgentPhase phase)
+    {
+        var normalized = value.Replace("-", string.Empty, StringComparison.Ordinal)
+            .Replace("_", string.Empty, StringComparison.Ordinal)
+            .Trim();
+
+        foreach (var candidate in Enum.GetValues<CoderAgentPhase>())
+        {
+            var candidateName = candidate.ToString()
+                .Replace("-", string.Empty, StringComparison.Ordinal)
+                .Replace("_", string.Empty, StringComparison.Ordinal);
+            if (string.Equals(candidateName, normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                phase = candidate;
+                return true;
+            }
+        }
+
+        phase = CoderAgentPhase.Unknown;
+        return false;
+    }
+
     private static void WriteJson<T>(T value)
     {
         Console.WriteLine(JsonSerializer.Serialize(value, JsonOptions));
+    }
+
+    private static void WritePetJson<T>(T value)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(value, PetJsonOptions));
     }
 
     private static string FormatPolicy(PowerPolicySnapshot? policy)
@@ -337,6 +516,8 @@ internal static class Program
         IBatteryMonitor BatteryMonitor,
         IProcessInspector ProcessInspector,
         ISleepBlocker SleepBlocker,
-        VibestickOptions Options);
+        VibestickOptions Options,
+        ICoderStatusSource CoderStatusSource,
+        CoderStatusWriter CoderStatusWriter,
+        PetStateResolver PetStateResolver);
 }
-
