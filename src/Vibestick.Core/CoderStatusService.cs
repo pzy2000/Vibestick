@@ -13,7 +13,26 @@ public static class CoderStatusPaths
 
     public static string GetStatusPath(string directory, string agent)
     {
-        return Path.Combine(directory, $"{SanitizeAgentName(agent)}.json");
+        return GetStatusPath(directory, agent, sessionId: null);
+    }
+
+    public static string GetStatusPath(string directory, string agent, string? sessionId)
+    {
+        var sanitizedAgent = SanitizeAgentName(agent);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return Path.Combine(directory, $"{sanitizedAgent}.json");
+        }
+
+        return Path.Combine(directory, $"{sanitizedAgent}-{SanitizeAgentName(sessionId)}.json");
+    }
+
+    public static bool IsStatusPathForAgent(string path, string agent)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(path);
+        var sanitizedAgent = SanitizeAgentName(agent);
+        return string.Equals(fileName, sanitizedAgent, StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith($"{sanitizedAgent}-", StringComparison.OrdinalIgnoreCase);
     }
 
     public static string SanitizeAgentName(string agent)
@@ -96,7 +115,10 @@ public sealed class JsonFileCoderStatusSource : ICoderStatusSource
         {
             Agent = string.IsNullOrWhiteSpace(status.Agent) ? "coder" : status.Agent.Trim(),
             Message = string.IsNullOrWhiteSpace(status.Message) ? null : status.Message.Trim(),
-            Workspace = string.IsNullOrWhiteSpace(status.Workspace) ? null : status.Workspace.Trim()
+            Workspace = string.IsNullOrWhiteSpace(status.Workspace) ? null : status.Workspace.Trim(),
+            SessionId = string.IsNullOrWhiteSpace(status.SessionId) ? null : status.SessionId.Trim(),
+            TaskSummary = string.IsNullOrWhiteSpace(status.TaskSummary) ? null : status.TaskSummary.Trim(),
+            SourcePath = string.IsNullOrWhiteSpace(status.SourcePath) ? null : status.SourcePath.Trim()
         };
     }
 }
@@ -126,6 +148,9 @@ public sealed class CoderStatusWriter
         string? workspace = null,
         int? processId = null,
         int? ttlSeconds = null,
+        string? sessionId = null,
+        string? taskSummary = null,
+        string? sourcePath = null,
         DateTimeOffset? now = null,
         CancellationToken cancellationToken = default)
     {
@@ -136,10 +161,13 @@ public sealed class CoderStatusWriter
             string.IsNullOrWhiteSpace(workspace) ? null : workspace.Trim(),
             processId,
             now ?? DateTimeOffset.UtcNow,
-            ttlSeconds);
+            ttlSeconds,
+            string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim(),
+            string.IsNullOrWhiteSpace(taskSummary) ? null : taskSummary.Trim(),
+            string.IsNullOrWhiteSpace(sourcePath) ? null : sourcePath.Trim());
 
         Directory.CreateDirectory(_directory);
-        var path = CoderStatusPaths.GetStatusPath(_directory, status.Agent);
+        var path = CoderStatusPaths.GetStatusPath(_directory, status.Agent, status.SessionId);
         var temporaryPath = $"{path}.tmp";
         await using (var stream = File.Create(temporaryPath))
         {
@@ -165,14 +193,16 @@ public sealed class CoderStatusWriter
 
         if (!string.IsNullOrWhiteSpace(agent))
         {
-            var path = CoderStatusPaths.GetStatusPath(_directory, agent);
-            if (!File.Exists(path))
+            var deletedForAgent = 0;
+            foreach (var path in Directory.EnumerateFiles(_directory, "*.json")
+                         .Where(path => CoderStatusPaths.IsStatusPathForAgent(path, agent))
+                         .ToArray())
             {
-                return 0;
+                File.Delete(path);
+                deletedForAgent++;
             }
 
-            File.Delete(path);
-            return 1;
+            return deletedForAgent;
         }
 
         var deleted = 0;
@@ -228,16 +258,16 @@ public sealed class CompositeCoderStatusSource : ICoderStatusSource
 
     public IReadOnlyList<CoderAgentStatus> GetStatuses(DateTimeOffset now)
     {
-        var byAgent = new Dictionary<string, CoderAgentStatus>(StringComparer.OrdinalIgnoreCase);
+        var byIdentity = new Dictionary<string, CoderAgentStatus>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in _sources)
         {
-            if (byAgent.Count > 0)
+            if (byIdentity.Count > 0)
             {
                 break;
             }
 
             var sourceStatuses = source.GetStatuses(now)
-                .GroupBy(static status => status.Agent, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(static status => GetStatusIdentity(status), StringComparer.OrdinalIgnoreCase)
                 .Select(static group => group
                     .OrderBy(static status => PetStateResolver.GetPhasePriority(status.Phase))
                     .ThenByDescending(static status => status.UpdatedAtUtc)
@@ -245,17 +275,25 @@ public sealed class CompositeCoderStatusSource : ICoderStatusSource
 
             foreach (var status in sourceStatuses)
             {
-                if (!byAgent.ContainsKey(status.Agent))
+                var identity = GetStatusIdentity(status);
+                if (!byIdentity.ContainsKey(identity))
                 {
-                    byAgent[status.Agent] = status;
+                    byIdentity[identity] = status;
                 }
             }
         }
 
-        return byAgent.Values
+        return byIdentity.Values
             .OrderBy(static status => PetStateResolver.GetPhasePriority(status.Phase))
             .ThenByDescending(static status => status.UpdatedAtUtc)
             .ThenBy(static status => status.Agent, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static string GetStatusIdentity(CoderAgentStatus status)
+    {
+        return string.IsNullOrWhiteSpace(status.SessionId)
+            ? status.Agent
+            : $"{status.Agent}:{status.SessionId}";
     }
 }

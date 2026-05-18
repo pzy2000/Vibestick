@@ -251,7 +251,10 @@ internal static class Program
                 GetOption(args, "--message"),
                 GetOption(args, "--workspace"),
                 processId,
-                ttlSeconds)
+                ttlSeconds,
+                sessionId: GetOption(args, "--session-id"),
+                taskSummary: GetOption(args, "--summary"),
+                sourcePath: GetOption(args, "--source-path"))
             .ConfigureAwait(false);
 
         if (json)
@@ -384,7 +387,7 @@ internal static class Program
         Console.WriteLine("  vibestick mode off|on|hyper [--json] [--once]");
         Console.WriteLine("  vibestick revert [--json]");
         Console.WriteLine("  vibestick pet status [--json] [--status-dir <path>]");
-        Console.WriteLine("  vibestick coder emit --phase <phase> [--agent <name>] [--message <text>] [--workspace <path>] [--pid <id>] [--ttl <seconds>] [--json] [--status-dir <path>]");
+        Console.WriteLine("  vibestick coder emit --phase <phase> [--agent <name>] [--message <text>] [--workspace <path>] [--pid <id>] [--ttl <seconds>] [--session-id <id>] [--summary <text>] [--source-path <path>] [--json] [--status-dir <path>]");
         Console.WriteLine("  vibestick coder clear [--agent <name>] [--json] [--status-dir <path>]");
         Console.WriteLine();
         Console.WriteLine("Notes:");

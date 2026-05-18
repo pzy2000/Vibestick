@@ -21,7 +21,10 @@ public sealed record CoderAgentStatus(
     string? Workspace,
     int? ProcessId,
     DateTimeOffset UpdatedAtUtc,
-    int? TtlSeconds);
+    int? TtlSeconds,
+    string? SessionId = null,
+    string? TaskSummary = null,
+    string? SourcePath = null);
 
 public enum PetMood
 {

@@ -20,7 +20,9 @@ internal static class Program
             ("Json state store recovers from corrupted state", TestCorruptedStateRecoveryAsync),
             ("Coder status adapter parses tool_calling and ignores stale entries", TestCoderStatusAdapterAsync),
             ("Codex session event mapper emits safe pet statuses", TestCodexSessionEventMapperAsync),
+            ("Codex task summary extraction ignores environment context", TestCodexTaskSummaryExtractionAsync),
             ("Codex session bridge tails newest rollout", TestCodexSessionStatusBridgeAsync),
+            ("Codex session bridge tracks multiple active rollouts", TestCodexSessionBridgeMultiSessionAsync),
             ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
             ("Pet resolver maps tool calling mood", TestPetResolverToolCallingAsync),
             ("Pet resolver displays elapsed active coder time", TestPetResolverActiveElapsedTimeAsync),
@@ -31,11 +33,13 @@ internal static class Program
             ("Pet resolver rotates charging power and full-time badge", TestPetResolverChargingBadgeRotationAsync),
             ("Pet resolver falls back to AC badge when charging estimate is missing", TestPetResolverChargingBadgeFallbackAsync),
             ("Composite coder source prefers adapter status over process fallback", TestCompositeCoderSourceAsync),
+            ("Composite coder source preserves same-agent sessions", TestCompositeCoderSourcePreservesSessionsAsync),
             ("Process coder source treats idle Codex as sleeping", TestProcessCoderSourceCodexSleepingAsync),
             ("CLI coder emit, pet status, and clear smoke", TestCliCoderStatusSmokeAsync),
             ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
             ("GUI Codex monitor starts by default and can be disabled", TestGuiCodexMonitorDefaultAndOptOutAsync),
-            ("Desktop pet e2e reflects state and bottom-right placement", TestDesktopPetE2EAsync)
+            ("Desktop pet e2e reflects state and bottom-right placement", TestDesktopPetE2EAsync),
+            ("Desktop pet e2e renders collapsed multi-session cards", TestDesktopPetMultiSessionE2EAsync)
         };
 
         var failed = 0;
@@ -262,6 +266,30 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestCodexTaskSummaryExtractionAsync()
+    {
+        AssertTrue(CodexSessionEventMapper.TryReadTaskSummary(
+            """
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\repo</cwd>\n</environment_context>\nImplement multi session cards\nwith summaries"}]}}
+            """,
+            out var summary));
+        AssertEqual("Implement multi session cards with summaries", summary);
+
+        AssertTrue(CodexSessionEventMapper.TryReadTaskSummary(
+            """
+            {"type":"event_msg","payload":{"type":"user_message","message":"<image>base64-noise</image>\nFix task cards"}}
+            """,
+            out var eventSummary));
+        AssertEqual("Fix task cards", eventSummary);
+
+        AssertFalse(CodexSessionEventMapper.TryReadTaskSummary(
+            """
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>only env</environment_context>"}]}}
+            """,
+            out _));
+        return Task.CompletedTask;
+    }
+
     private static async Task TestCodexSessionStatusBridgeAsync()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"vibestick-codex-bridge-{Guid.NewGuid():N}");
@@ -303,6 +331,51 @@ internal static class Program
 
         bridge.Dispose();
         Directory.Delete(directory, recursive: true);
+    }
+
+    private static async Task TestCodexSessionBridgeMultiSessionAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-codex-multi-{Guid.NewGuid():N}");
+        var statusDirectory = Path.Combine(directory, "status");
+        var sessionsRoot = Path.Combine(directory, "sessions");
+        var sessionDay = Path.Combine(sessionsRoot, "2026", "05", "18");
+        Directory.CreateDirectory(sessionDay);
+
+        try
+        {
+            using var bridge = new CodexSessionStatusBridge(statusDirectory, sessionsRoot);
+            bridge.Start();
+
+            var firstSession = Path.Combine(sessionDay, "rollout-2026-05-18T10-00-00-first.jsonl");
+            await File.WriteAllTextAsync(
+                    firstSession,
+                    """
+                    {"type":"session_meta","payload":{"id":"session-a","cwd":"C:\\repo-a"}}
+                    {"type":"event_msg","payload":{"type":"user_message","message":"Implement first task"}}
+                    {"type":"response_item","payload":{"type":"function_call","name":"shell_command"}}
+                    """ + Environment.NewLine)
+                .ConfigureAwait(false);
+
+            var secondSession = Path.Combine(sessionDay, "rollout-2026-05-18T10-00-01-second.jsonl");
+            await File.WriteAllTextAsync(
+                    secondSession,
+                    """
+                    {"type":"session_meta","payload":{"id":"session-b","cwd":"C:\\repo-b"}}
+                    {"type":"event_msg","payload":{"type":"user_message","message":"Implement second task"}}
+                    {"type":"response_item","payload":{"type":"reasoning"}}
+                    """ + Environment.NewLine)
+                .ConfigureAwait(false);
+
+            var statuses = await WaitForCoderStatusCountAsync(statusDirectory, 2, TimeSpan.FromSeconds(5))
+                .ConfigureAwait(false);
+            AssertSequence(new[] { "session-a", "session-b" }, statuses.Select(static status => status.SessionId!).Order().ToArray());
+            AssertTrue(statuses.Any(static status => status.TaskSummary == "Implement first task"));
+            AssertTrue(statuses.Any(static status => status.TaskSummary == "Implement second task"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static Task TestPetResolverPhasePriorityAsync()
@@ -492,6 +565,25 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestCompositeCoderSourcePreservesSessionsAsync()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var composite = new CompositeCoderStatusSource(
+            new StaticCoderStatusSource(new[]
+            {
+                CreateCoder("codex", CoderAgentPhase.Reasoning, "first", updatedAtUtc: now, sessionId: "session-a", summary: "First task"),
+                CreateCoder("codex", CoderAgentPhase.ToolCalling, "second", updatedAtUtc: now.AddSeconds(1), sessionId: "session-b", summary: "Second task"),
+                CreateCoder("codex", CoderAgentPhase.Running, "fallback", updatedAtUtc: now.AddSeconds(2), sessionId: "session-a", summary: "Older duplicate")
+            }));
+
+        var statuses = composite.GetStatuses(now);
+        AssertEqual(2, statuses.Count);
+        AssertSequence(new[] { "session-b", "session-a" }, statuses.Select(static status => status.SessionId!).ToArray());
+        AssertEqual(CoderAgentPhase.ToolCalling, statuses[0].Phase);
+        AssertEqual(CoderAgentPhase.Reasoning, statuses[1].Phase);
+        return Task.CompletedTask;
+    }
+
     private static Task TestProcessCoderSourceCodexSleepingAsync()
     {
         var now = DateTimeOffset.Parse("2026-05-18T10:00:00Z");
@@ -558,13 +650,22 @@ internal static class Program
         var compactToolJson = JsonNode.Parse(compactToolAlias.StandardOutput) ?? throw new InvalidOperationException("Expected compact tool alias JSON.");
         AssertEqual("tool_calling", compactToolJson["status"]?["phase"]?.GetValue<string>());
 
+        var sessionEmit = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase reasoning --message \"session\" --session-id cli-session --summary \"CLI session task\" --ttl 60 --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, sessionEmit.ExitCode);
+        var sessionJson = JsonNode.Parse(sessionEmit.StandardOutput) ?? throw new InvalidOperationException("Expected session emit JSON.");
+        AssertEqual("cli-session", sessionJson["status"]?["sessionId"]?.GetValue<string>());
+        AssertEqual("CLI session task", sessionJson["status"]?["taskSummary"]?.GetValue<string>());
+
         var clear = await RunDotnetAsync(
             repoRoot,
             $"run --project src\\Vibestick.Cli --configuration Release -- coder clear --agent codex --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, clear.ExitCode);
         var clearJson = JsonNode.Parse(clear.StandardOutput) ?? throw new InvalidOperationException("Expected clear JSON.");
-        AssertEqual(1, clearJson["deleted"]?.GetValue<int>());
+        AssertEqual(2, clearJson["deleted"]?.GetValue<int>());
 
         Directory.Delete(directory, recursive: true);
     }
@@ -721,6 +822,56 @@ internal static class Program
         }
     }
 
+    private static async Task TestDesktopPetMultiSessionE2EAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-e2e-multi-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var placementPath = Path.Combine(directory, "pet-window.json");
+        Directory.CreateDirectory(directory);
+
+        var writer = new CoderStatusWriter(directory);
+        await writer.EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", ttlSeconds: 60, sessionId: "session-1", taskSummary: "Authorize deployment").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.ToolCalling, "Using shell_command", ttlSeconds: 60, sessionId: "session-2", taskSummary: "Run focused tests").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.Reasoning, "Thinking", ttlSeconds: 60, sessionId: "session-3", taskSummary: "Design pet task cards").ConfigureAwait(false);
+        await writer.EmitAsync("codex", CoderAgentPhase.Running, "Running", ttlSeconds: 60, sessionId: "session-4", taskSummary: "Prepare docs").ConfigureAwait(false);
+
+        var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = $"\"{guiDll}\" --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI.");
+
+        try
+        {
+            var snapshot = await WaitForPetTaskCardsAsync(directory, total: 4, visible: 3, hidden: 1, TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
+            AssertEqual(false, snapshot["taskCards"]?["expanded"]?.GetValue<bool>());
+
+            var items = snapshot["taskCards"]?["items"]?.AsArray() ??
+                throw new InvalidOperationException("Snapshot missing task card items.");
+            AssertEqual(3, items.Count);
+            AssertEqual("Authorize deployment", items[0]?["summary"]?.GetValue<string>());
+            AssertEqual("Run focused tests", items[1]?["summary"]?.GetValue<string>());
+            AssertEqual("Design pet task cards", items[2]?["summary"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static VibestickEngine CreateEngine(
         IPowerPolicyManager policy,
         IStateStore store,
@@ -754,16 +905,23 @@ internal static class Program
         string agent,
         CoderAgentPhase phase,
         string? message = null,
-        DateTimeOffset? updatedAtUtc = null)
+        DateTimeOffset? updatedAtUtc = null,
+        string? sessionId = null,
+        string? summary = null,
+        string? workspace = null,
+        string? sourcePath = null)
     {
         return new CoderAgentStatus(
             agent,
             phase,
             message,
-            Workspace: null,
+            workspace,
             ProcessId: null,
             updatedAtUtc ?? DateTimeOffset.UtcNow,
-            TtlSeconds: 120);
+            TtlSeconds: 120,
+            sessionId,
+            summary,
+            sourcePath);
     }
 
     private static string GetBatteryBadgeText(PetState state)
@@ -928,6 +1086,27 @@ internal static class Program
         throw new TimeoutException($"Coder status did not reach phase '{expectedPhase}' within {timeout.TotalSeconds} seconds.");
     }
 
+    private static async Task<IReadOnlyList<CoderAgentStatus>> WaitForCoderStatusCountAsync(
+        string statusDirectory,
+        int expectedCount,
+        TimeSpan timeout)
+    {
+        var source = new JsonFileCoderStatusSource(statusDirectory);
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var statuses = source.GetStatuses(DateTimeOffset.UtcNow);
+            if (statuses.Count == expectedCount)
+            {
+                return statuses;
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Coder status count did not reach {expectedCount} within {timeout.TotalSeconds} seconds.");
+    }
+
     private static async Task<JsonNode> WaitForPetSnapshotAnyAsync(
         string statusDirectory,
         TimeSpan timeout)
@@ -984,6 +1163,41 @@ internal static class Program
         throw new TimeoutException($"Pet snapshot did not reach mood '{expectedMood}' within {timeout.TotalSeconds} seconds.");
     }
 
+    private static async Task<JsonNode> WaitForPetTaskCardsAsync(
+        string statusDirectory,
+        int total,
+        int visible,
+        int hidden,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    var taskCards = node?["taskCards"];
+                    if (taskCards?["total"]?.GetValue<int>() == total &&
+                        taskCards["visible"]?.GetValue<int>() == visible &&
+                        taskCards["hidden"]?.GetValue<int>() == hidden)
+                    {
+                        return node!;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(250).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet task cards did not reach total={total}, visible={visible}, hidden={hidden} within {timeout.TotalSeconds} seconds.");
+    }
+
     private static void AssertNearBottomRight(JsonNode snapshot)
     {
         var left = snapshot["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
@@ -1008,8 +1222,8 @@ internal static class Program
         var height = snapshot["height"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing height.");
         var scale = snapshot["scale"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing scale.");
 
-        AssertNear(248, width, 0.5, "pet width");
-        AssertNear(292, height, 0.5, "pet height");
+        AssertNear(410, width, 0.5, "pet width");
+        AssertNear(580, height, 0.5, "pet height");
         AssertNear(1.0, scale, 0.001, "pet scale");
     }
 
