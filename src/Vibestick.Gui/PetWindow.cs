@@ -45,6 +45,7 @@ public sealed class PetWindow : Window
     private const double TaskCardWidth = 324;
     private static readonly TimeSpan MoodFrameInterval = TimeSpan.FromMilliseconds(420);
     private static readonly TimeSpan CrawlFrameInterval = TimeSpan.FromMilliseconds(140);
+    private static readonly TimeSpan HoverFrameInterval = TimeSpan.FromMilliseconds(240);
 
     private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
     {
@@ -76,7 +77,8 @@ public sealed class PetWindow : Window
     {
         Width = 184,
         Height = 198,
-        HorizontalAlignment = HorizontalAlignment.Center
+        HorizontalAlignment = HorizontalAlignment.Center,
+        Background = Brushes.Transparent
     };
     private readonly PetSpriteAnimator _spriteAnimator;
     private PetState? _currentState;
@@ -170,6 +172,8 @@ public sealed class PetWindow : Window
         MouseLeftButtonDown += OnMouseLeftButtonDown;
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnMouseLeftButtonUp;
+        _spriteLayer.MouseEnter += (_, _) => StartSpriteHover();
+        _spriteLayer.MouseLeave += (_, _) => StopSpriteHover();
     }
 
     public async Task RefreshNowAsync()
@@ -816,6 +820,7 @@ public sealed class PetWindow : Window
         }
 
         _isDragging = true;
+        StopSpriteHover();
         if (_pointerInteraction == PointerInteraction.Resize)
         {
             ResizeFromDrag(delta);
@@ -847,6 +852,26 @@ public sealed class PetWindow : Window
         Cursor = IsResizeHit(args) ? InputCursors.SizeNWSE : InputCursors.Arrow;
     }
 
+    private void StartSpriteHover()
+    {
+        if (_isDragging)
+        {
+            return;
+        }
+
+        _spriteAnimator.SetHovering(true);
+        _frameTimer.Interval = HoverFrameInterval;
+    }
+
+    private void StopSpriteHover()
+    {
+        _spriteAnimator.SetHovering(false);
+        if (!_isDragging)
+        {
+            _frameTimer.Interval = MoodFrameInterval;
+        }
+    }
+
     private void UpdateCrawlDirection(Point current, Vector totalDelta)
     {
         var previous = _lastDragPoint ?? _dragStart ?? current;
@@ -868,6 +893,7 @@ public sealed class PetWindow : Window
     private void StopCrawling()
     {
         _spriteAnimator.SetCrawlDirection(null);
+        _spriteAnimator.SetHovering(false);
         _frameTimer.Interval = MoodFrameInterval;
     }
 
@@ -966,6 +992,7 @@ public sealed class PetWindow : Window
                 Width,
                 Height,
                 Scale = _scale,
+                Sprite = _spriteAnimator.CurrentFrame,
                 StatusBubbleVisible = _statusBubble.Visibility == Visibility.Visible,
                 TaskCards = new
                 {

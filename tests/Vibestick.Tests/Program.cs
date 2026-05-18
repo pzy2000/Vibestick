@@ -866,9 +866,8 @@ internal static class Program
         var publishDirectory = Path.Combine(directory, "publish");
         var placementPath = Path.Combine(directory, "pet-window.json");
         Directory.CreateDirectory(directory);
-
         await new CoderStatusWriter(directory)
-            .EmitAsync("codex", CoderAgentPhase.Reasoning, "reasoning", ttlSeconds: 60)
+            .EmitAsync("codex", CoderAgentPhase.Idle, "idle", ttlSeconds: 60)
             .ConfigureAwait(false);
 
         var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
@@ -884,22 +883,39 @@ internal static class Program
 
         try
         {
+            var idle = await WaitForPetSnapshotAsync(directory, "idle", TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
+            AssertSpritePose(idle, "seated", expectedRow: 4);
+
+            await new CoderStatusWriter(directory)
+                .EmitAsync("codex", CoderAgentPhase.Reasoning, "reasoning", ttlSeconds: 60)
+                .ConfigureAwait(false);
             var reasoning = await WaitForPetSnapshotAsync(directory, "reasoning", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
             AssertDefaultPetScale(reasoning);
             AssertNearBottomRight(reasoning);
+            AssertSpritePose(reasoning, "seated", expectedRow: 4);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.ToolCalling, "tool", processId: process.Id, ttlSeconds: 60)
                 .ConfigureAwait(false);
-            await WaitForPetSnapshotAsync(directory, "tool_calling", TimeSpan.FromSeconds(10))
+            var toolCalling = await WaitForPetSnapshotAsync(directory, "tool_calling", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
+            AssertSpritePose(toolCalling, "seated", expectedRow: 4);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", processId: process.Id, ttlSeconds: 60)
                 .ConfigureAwait(false);
-            await WaitForPetSnapshotAsync(directory, "waiting_authorization", TimeSpan.FromSeconds(10))
+            var waitingAuthorization = await WaitForPetSnapshotAsync(directory, "waiting_authorization", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
+            AssertSpritePose(waitingAuthorization, "seated", expectedRow: 4);
+
+            await new CoderStatusWriter(directory)
+                .EmitAsync("codex", CoderAgentPhase.Running, "running", processId: process.Id, ttlSeconds: 60)
+                .ConfigureAwait(false);
+            var running = await WaitForPetSnapshotAsync(directory, "running", TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
+            AssertSpritePose(running, "standing", expectedRow: 2);
         }
         finally
         {
@@ -1336,6 +1352,13 @@ internal static class Program
         AssertNear(410, width, 0.5, "pet width");
         AssertNear(580, height, 0.5, "pet height");
         AssertNear(1.0, scale, 0.001, "pet scale");
+    }
+
+    private static void AssertSpritePose(JsonNode snapshot, string expectedPose, int expectedRow)
+    {
+        var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
+        AssertEqual(expectedPose, sprite["pose"]?.GetValue<string>());
+        AssertEqual(expectedRow, sprite["row"]?.GetValue<int>());
     }
 
     private static void AssertNear(double expected, double actual, double tolerance, string name)

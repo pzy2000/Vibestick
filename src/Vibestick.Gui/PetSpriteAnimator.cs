@@ -13,12 +13,20 @@ public enum PetSpriteCrawlDirection
     Right
 }
 
+public sealed record PetSpriteFrameSnapshot(
+    string Pose,
+    int Column,
+    int Row,
+    int FrameIndex,
+    string? Direction);
+
 public sealed class PetSpriteAnimator
 {
     private const int FrameWidth = 192;
     private const int FrameHeight = 208;
     private const int MoodFrameCount = 2;
     private const int CrawlFrameCount = 4;
+    private const int HoverFrameCount = 2;
 
     private readonly Image _image;
     private readonly TextBlock _fallback;
@@ -26,6 +34,7 @@ public sealed class PetSpriteAnimator
     private readonly ScaleTransform _directionTransform = new(1, 1);
     private PetMood _mood = PetMood.Idle;
     private PetSpriteCrawlDirection? _crawlDirection;
+    private bool _isHovering;
     private int _frameIndex;
 
     public PetSpriteAnimator(Image image, TextBlock fallback)
@@ -39,6 +48,8 @@ public sealed class PetSpriteAnimator
         _fallback.Visibility = _sheet is null ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
         Render();
     }
+
+    public PetSpriteFrameSnapshot CurrentFrame { get; private set; } = new("seated", 1, 4, 0, null);
 
     public void SetMood(PetMood mood)
     {
@@ -64,6 +75,21 @@ public sealed class PetSpriteAnimator
         Render();
     }
 
+    public void SetHovering(bool isHovering)
+    {
+        if (_isHovering == isHovering)
+        {
+            return;
+        }
+
+        _isHovering = isHovering;
+        if (_crawlDirection is null)
+        {
+            _frameIndex = 0;
+            Render();
+        }
+    }
+
     public void AdvanceFrame()
     {
         _frameIndex = (_frameIndex + 1) % GetActiveFrameCount();
@@ -72,15 +98,15 @@ public sealed class PetSpriteAnimator
 
     private void Render()
     {
-        _fallback.Text = _crawlDirection is null ? _mood.ToString() : $"Crawling {_crawlDirection}";
+        var frame = GetActiveFrame();
+        CurrentFrame = frame;
+        _fallback.Text = frame.Pose;
         if (_sheet is null)
         {
             return;
         }
 
-        var (column, row) = _crawlDirection is null
-            ? GetMoodFrame(_mood, _frameIndex)
-            : GetCrawlFrame(_frameIndex);
+        var (column, row) = (frame.Column, frame.Row);
         _directionTransform.ScaleX = _crawlDirection == PetSpriteCrawlDirection.Left ? -1 : 1;
         _image.Source = new CroppedBitmap(
             _sheet,
@@ -93,7 +119,31 @@ public sealed class PetSpriteAnimator
 
     private int GetActiveFrameCount()
     {
-        return _crawlDirection is null ? MoodFrameCount : CrawlFrameCount;
+        if (_crawlDirection is not null)
+        {
+            return CrawlFrameCount;
+        }
+
+        return _isHovering ? HoverFrameCount : MoodFrameCount;
+    }
+
+    private PetSpriteFrameSnapshot GetActiveFrame()
+    {
+        if (_crawlDirection is not null)
+        {
+            var (column, row) = GetCrawlFrame(_frameIndex);
+            return new PetSpriteFrameSnapshot("crawling", column, row, _frameIndex, _crawlDirection.ToString());
+        }
+
+        if (_isHovering)
+        {
+            var (column, row) = GetHoverFrame(_frameIndex);
+            return new PetSpriteFrameSnapshot("hover-bob", column, row, _frameIndex, null);
+        }
+
+        var moodPose = _mood == PetMood.Running ? "standing" : "seated";
+        var (moodColumn, moodRow) = GetMoodFrame(_mood, _frameIndex);
+        return new PetSpriteFrameSnapshot(moodPose, moodColumn, moodRow, _frameIndex, null);
     }
 
     private static BitmapSource? LoadSheet()
@@ -118,20 +168,20 @@ public sealed class PetSpriteAnimator
         return (frameIndex % CrawlFrameCount, 1);
     }
 
+    private static (int Column, int Row) GetHoverFrame(int frameIndex)
+    {
+        return frameIndex % HoverFrameCount == 0
+            ? (1, 4)
+            : (0, 1);
+    }
+
     private static (int Column, int Row) GetMoodFrame(PetMood mood, int frameIndex)
     {
-        return mood switch
+        if (mood == PetMood.Running)
         {
-            PetMood.Sleeping => (2 + frameIndex, 5),
-            PetMood.Running => (frameIndex, 1),
-            PetMood.Reasoning => (4 + frameIndex, 7),
-            PetMood.ToolCalling => (frameIndex, 1),
-            PetMood.WaitingAuthorization => (1 + frameIndex, 3),
-            PetMood.Error => (frameIndex, 5),
-            PetMood.Success => (1 + frameIndex, 7),
-            PetMood.Offline => (2 + frameIndex, 5),
-            PetMood.PowerWarning => (6 + frameIndex, 5),
-            _ => (frameIndex, 0)
-        };
+            return (frameIndex % MoodFrameCount, 2);
+        }
+
+        return (1 + frameIndex % MoodFrameCount, 4);
     }
 }
