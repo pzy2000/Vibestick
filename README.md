@@ -1,0 +1,66 @@
+# Vibestick
+
+Vibestick is a Windows-first CLI prototype for a physical sleep-policy key.
+
+The MVP proves the core workflow before tray UI or real hardware:
+
+- `off`: restore the original lid-close policy and release keep-awake state.
+- `on`: set the current Windows power plan lid-close action to `Do Nothing`.
+- `hyper`: apply `on`, add battery safeguards, detect long-running coder tasks, and optionally hold a foreground sleep blocker.
+
+## Prerequisites
+
+- Windows 10/11
+- .NET 8 SDK
+
+This repository intentionally has no external NuGet package dependencies.
+
+## Commands
+
+```powershell
+dotnet run --project src/Vibestick.Cli -- status
+dotnet run --project src/Vibestick.Cli -- status --json
+dotnet run --project src/Vibestick.Cli -- doctor
+dotnet run --project src/Vibestick.Cli -- mode on
+dotnet run --project src/Vibestick.Cli -- mode hyper
+dotnet run --project src/Vibestick.Cli -- mode hyper --once
+dotnet run --project src/Vibestick.Cli -- mode off
+dotnet run --project src/Vibestick.Cli -- revert
+```
+
+On this machine the SDK was installed with `dotnet-install` under `%USERPROFILE%\.dotnet`. You can use the wrapper without changing PATH:
+
+```powershell
+.\scripts\vibestick.ps1 status
+.\scripts\vibestick.ps1 doctor --json
+```
+
+`mode hyper` keeps a foreground guard process alive so Windows idle sleep remains blocked while it runs. Use `Ctrl+C` to stop the guard. `mode hyper --once` applies the power policy and exits, but it cannot keep a sleep assertion after the process exits.
+
+## GUI
+
+The GUI wraps the same core functions as the CLI:
+
+```powershell
+.\scripts\vibestick-gui.ps1
+```
+
+The window exposes status refresh, diagnostics, ON, HYPER, Stop HYPER Guard, and OFF/Revert controls. HYPER in the GUI keeps a sleep blocker active while the window remains open or until you stop the guard.
+
+## State
+
+Vibestick stores local state at:
+
+```text
+%LOCALAPPDATA%\Vibestick\state.json
+```
+
+The state file records the original lid-close AC/DC values for the active power scheme so `revert` can restore them. Vibestick will not overwrite a pending backup; run `vibestick revert` before applying a fresh mode to a different active power scheme.
+
+## Tests
+
+```powershell
+dotnet run --project tests/Vibestick.Tests
+```
+
+The test runner is a small console app so the MVP can stay dependency-free.
