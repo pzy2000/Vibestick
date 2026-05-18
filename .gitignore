@@ -4,8 +4,9 @@ obj/
 .vscode/
 TestResults/
 artifacts/
+macos/.build/
+macos/dist/
 *.user
 *.suo
 *.nupkg
 *.snupkg
-

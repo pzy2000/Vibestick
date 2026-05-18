@@ -1,21 +1,27 @@
 # Vibestick
 
-Vibestick is a Windows-first CLI prototype for a physical sleep-policy key.
+[English](README.md) | [中文](README.zh-CN.md)
 
-The MVP proves the core workflow before tray UI or real hardware:
+Vibestick is a desktop sleep-policy key and desktop-pet prototype.
+
+The original Windows implementation remains in `src/` and `tests/`. A native
+macOS product line now lives under `macos/` with SwiftUI/AppKit UI,
+`vibestickctl`, and a privileged helper for `pmset` policy changes.
+
+The core workflow:
 
 - `off`: restore the original lid-close policy and release keep-awake state.
-- `on`: set the current Windows power plan lid-close action to `Do Nothing`.
+- `on`: set the current platform sleep policy to Vibestick-controlled wake behavior.
 - `hyper`: apply `on`, add battery safeguards, detect long-running coder tasks, and optionally hold a foreground sleep blocker.
 
-## Prerequisites
+## Windows Prerequisites
 
 - Windows 10/11
 - .NET 8 SDK
 
 This repository intentionally has no external NuGet package dependencies.
 
-## Commands
+## Windows Commands
 
 ```powershell
 dotnet run --project src/Vibestick.Cli -- status
@@ -100,3 +106,86 @@ dotnet run --project tests/Vibestick.Tests
 ```
 
 The test runner is a small console app so the MVP can stay dependency-free.
+
+## macOS Native Build
+
+The macOS line is intentionally separate from the Windows `.sln`:
+
+```bash
+cd macos
+swift build
+swift test
+```
+
+Targets:
+
+- `VibestickApp`: SwiftUI/AppKit control panel, menu bar item, and desktop pet.
+- `vibestickctl`: native CLI for `status`, `doctor`, `mode`, `revert`, `pet`, and `coder`.
+- `VibestickHelper`: privileged helper command surface for fixed `pmset` operations.
+- `VibestickMacCore`: shared native services and parsers.
+
+For local development without installing the helper, point the CLI at the built
+helper:
+
+```bash
+export VIBESTICK_HELPER_PATH="$PWD/.build/debug/VibestickHelper"
+.build/debug/vibestickctl doctor
+.build/debug/vibestickctl status --json
+```
+
+Commands that mutate power policy, including `mode on`, `mode hyper`, and
+`revert`, require the helper to run as root. Install the helper before running
+those commands normally.
+
+`mode on` stores the original `pmset` settings and sets system sleep to
+Vibestick-controlled wake behavior. `mode hyper` also applies the Hyper battery
+override settings and holds an IOKit no-idle-sleep assertion while the app or
+CLI guard process is alive. In Hyper, low battery keeps wake priority and does
+not use the Windows warn/downgrade/revert threshold behavior.
+
+Mac user state and coder adapter files are stored under:
+
+```text
+~/Library/Application Support/Vibestick/
+```
+
+The helper backup state is stored under:
+
+```text
+/Library/Application Support/Vibestick/power-state.json
+```
+
+## macOS Helper And Release
+
+Build a development `.app` bundle:
+
+```bash
+macos/scripts/build-release.sh dev
+```
+
+Install the helper for local privileged `pmset` control:
+
+```bash
+cd macos
+swift build -c release
+scripts/install-helper.sh
+```
+
+Uninstall it:
+
+```bash
+macos/scripts/uninstall-helper.sh
+```
+
+Release signing intentionally fails fast unless these values are configured:
+
+```bash
+export DEVELOPER_ID_APPLICATION="Developer ID Application: ..."
+export DEVELOPER_ID_INSTALLER="Developer ID Installer: ..."
+export NOTARY_PROFILE="vibestick-notary"
+macos/scripts/build-release.sh release
+```
+
+`doctor` only reports verifiable local state: helper availability, helper
+communication, `pmset`, restore state, battery, Vibestick assertion,
+Accessibility authorization, and long-running coder tasks.
