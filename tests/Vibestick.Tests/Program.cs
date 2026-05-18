@@ -174,10 +174,10 @@ internal static class Program
     {
         var options = new VibestickOptions();
         var matches = LongTaskDetector.FindMatches(
-            new[] { "node.exe", "explorer", "PYTHON", "docker.exe", "notepad" },
+            new[] { "node.exe", "explorer", "PYTHON", "python3", "docker.exe", "notepad", "codex", "claude.exe" },
             options.LongTaskProcessNames);
 
-        AssertSequence(new[] { "docker", "node", "python" }, matches);
+        AssertSequence(new[] { "claude", "codex", "docker" }, matches);
         return Task.CompletedTask;
     }
 

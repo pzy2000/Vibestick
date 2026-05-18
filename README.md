@@ -73,7 +73,7 @@ To disable automatic Codex monitoring for debugging:
 .\scripts\vibestick-gui.ps1 --no-codex-monitor
 ```
 
-When no adapter state exists, Vibestick falls back to whitelisted process detection for tools such as Codex, Claude, node, Python, Docker, and similar long-running coder tasks.
+When no adapter state exists, Vibestick falls back to whitelisted process detection for tools such as Codex, Claude, Docker, and similar long-running coder tasks.
 
 Manual adapter commands remain useful for testing and non-Codex integrations:
 
