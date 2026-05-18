@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows;
@@ -49,8 +50,14 @@ public sealed class App : Application
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
         var statusDirectory = GetOption(_args, "--status-dir") ??
             Environment.GetEnvironmentVariable("VIBESTICK_CODER_STATUS_DIR");
+        var codexSessionsRoot = GetOption(_args, "--codex-sessions-dir") ??
+            Environment.GetEnvironmentVariable("VIBESTICK_CODEX_SESSIONS_DIR");
         _placementPath = GetOption(_args, "--placement-path");
-        _services = GuiServiceFactory.Create(statusDirectory);
+        _services = GuiServiceFactory.Create(
+            statusDirectory,
+            enableCodexMonitor: !HasFlag(_args, "--no-codex-monitor"),
+            codexSessionsRoot);
+        _services.CodexStatusBridge?.Start();
         _runtimeState = new GuiRuntimeState();
 
         CreateTrayIcon();
@@ -78,6 +85,7 @@ public sealed class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _services?.CodexStatusBridge?.Dispose();
         _notifyIcon?.Dispose();
         base.OnExit(e);
     }
@@ -613,7 +621,37 @@ public sealed class MainWindow : Window
         }
 
         var percent = battery.Percentage.HasValue ? $"{battery.Percentage.Value}%" : "Unknown";
-        return battery.IsAcConnected ? $"{percent}, AC" : $"{percent}, battery";
+        if (!battery.IsAcConnected)
+        {
+            return $"{percent}, battery";
+        }
+
+        var chargingDetail = FormatChargingDetail(battery);
+        return chargingDetail is null ? $"{percent}, AC" : $"{percent}, AC, {chargingDetail}";
+    }
+
+    private static string? FormatChargingDetail(BatteryInfo battery)
+    {
+        if (battery.ChargeRateInMilliwatts is null or <= 0 || battery.EstimatedTimeToFull is null)
+        {
+            return null;
+        }
+
+        var watts = battery.ChargeRateInMilliwatts.Value / 1000d;
+        return $"{watts.ToString(watts >= 10 ? "0" : "0.#", CultureInfo.InvariantCulture)}W charging, full in {FormatDuration(battery.EstimatedTimeToFull.Value)}";
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        var totalMinutes = Math.Max(1, (int)Math.Ceiling(duration.TotalMinutes));
+        if (totalMinutes < 60)
+        {
+            return $"{totalMinutes}m";
+        }
+
+        var hours = totalMinutes / 60;
+        var minutes = totalMinutes % 60;
+        return minutes == 0 ? $"{hours}h" : $"{hours}h{minutes}m";
     }
 
     private static SolidColorBrush Brush(string color)

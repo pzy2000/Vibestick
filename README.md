@@ -49,15 +49,21 @@ Right-click the pet or tray icon for the control panel and exit actions. The con
 
 ## Desktop Pet Coder Status
 
-Vibestick reads precise vibe-coder state from local adapter files under:
+Vibestick starts a local Codex status bridge with the pet by default. The bridge watches Codex session JSONL files under `%USERPROFILE%\.codex\sessions`, maps fresh Codex events to summary pet states, and writes those summaries to local adapter files under:
 
 ```text
 %LOCALAPPDATA%\Vibestick\coder-status\*.json
 ```
 
+Use Codex normally after starting the pet; the pet switches between thinking, tool-calling, success, and other supported moods as new Codex session events arrive. To disable automatic Codex monitoring for debugging:
+
+```powershell
+.\scripts\vibestick-gui.ps1 --no-codex-monitor
+```
+
 When no adapter state exists, Vibestick falls back to whitelisted process detection for tools such as Codex, Claude, node, Python, Docker, and similar long-running coder tasks.
 
-Useful integration commands:
+Manual adapter commands remain useful for testing and non-Codex integrations:
 
 ```powershell
 .\scripts\vibestick.ps1 pet status --json

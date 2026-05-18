@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Vibestick.Core;
@@ -179,6 +180,7 @@ internal static class Program
             {
                 ok = true,
                 statusDirectory = services.CoderStatusWriter.DirectoryPath,
+                battery = status.Battery,
                 pet = petState
             });
         }
@@ -498,7 +500,41 @@ internal static class Program
         }
 
         var percent = battery.Percentage.HasValue ? $"{battery.Percentage.Value}%" : "unknown";
-        return $"{percent}, AC connected={YesNo(battery.IsAcConnected)}";
+        var parts = new List<string> { percent, $"AC connected={YesNo(battery.IsAcConnected)}" };
+        if (battery.IsAcConnected)
+        {
+            var chargingDetail = FormatChargingDetail(battery);
+            if (chargingDetail is not null)
+            {
+                parts.Add(chargingDetail);
+            }
+        }
+
+        return string.Join(", ", parts);
+    }
+
+    private static string? FormatChargingDetail(BatteryInfo battery)
+    {
+        if (battery.ChargeRateInMilliwatts is null or <= 0 || battery.EstimatedTimeToFull is null)
+        {
+            return null;
+        }
+
+        var watts = battery.ChargeRateInMilliwatts.Value / 1000d;
+        return $"{watts.ToString(watts >= 10 ? "0" : "0.#", CultureInfo.InvariantCulture)}W charging, full in {FormatDuration(battery.EstimatedTimeToFull.Value)}";
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        var totalMinutes = Math.Max(1, (int)Math.Ceiling(duration.TotalMinutes));
+        if (totalMinutes < 60)
+        {
+            return $"{totalMinutes}m";
+        }
+
+        var hours = totalMinutes / 60;
+        var minutes = totalMinutes % 60;
+        return minutes == 0 ? $"{hours}h" : $"{hours}h{minutes}m";
     }
 
     private static string FormatTasks(IReadOnlyList<LongTaskProcess> tasks)

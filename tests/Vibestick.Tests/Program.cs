@@ -19,14 +19,19 @@ internal static class Program
             ("Long task detector matches normalized process names", TestLongTaskDetectorAsync),
             ("Json state store recovers from corrupted state", TestCorruptedStateRecoveryAsync),
             ("Coder status adapter parses tool_calling and ignores stale entries", TestCoderStatusAdapterAsync),
+            ("Codex session event mapper emits safe pet statuses", TestCodexSessionEventMapperAsync),
+            ("Codex session bridge tails newest rollout", TestCodexSessionStatusBridgeAsync),
             ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
             ("Pet resolver maps tool calling mood", TestPetResolverToolCallingAsync),
             ("Pet resolver prioritizes tool calling over reasoning and running", TestPetResolverToolCallingPriorityAsync),
             ("Pet resolver falls back to idle without coders", TestPetResolverIdleFallbackAsync),
             ("Pet resolver lets critical power override coder mood", TestPetResolverPowerOverrideAsync),
+            ("Pet resolver rotates charging power and full-time badge", TestPetResolverChargingBadgeRotationAsync),
+            ("Pet resolver falls back to AC badge when charging estimate is missing", TestPetResolverChargingBadgeFallbackAsync),
             ("Composite coder source prefers adapter status over process fallback", TestCompositeCoderSourceAsync),
             ("CLI coder emit, pet status, and clear smoke", TestCliCoderStatusSmokeAsync),
             ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
+            ("GUI Codex monitor starts by default and can be disabled", TestGuiCodexMonitorDefaultAndOptOutAsync),
             ("Desktop pet e2e reflects state and bottom-right placement", TestDesktopPetE2EAsync)
         };
 
@@ -222,6 +227,81 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestCodexSessionEventMapperAsync()
+    {
+        AssertTrue(CodexSessionEventMapper.TryMapJsonLine(
+            """{"type":"event_msg","payload":{"type":"task_started"}}""",
+            out var taskStarted));
+        AssertEqual(CoderAgentPhase.Reasoning, taskStarted.Phase);
+        AssertEqual("Codex is thinking", taskStarted.Message);
+
+        AssertTrue(CodexSessionEventMapper.TryMapJsonLine(
+            """{"type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"Get-Content secret.txt"}}""",
+            out var toolCall));
+        AssertEqual(CoderAgentPhase.ToolCalling, toolCall.Phase);
+        AssertEqual("Using shell_command", toolCall.Message);
+        AssertFalse(toolCall.Message.Contains("secret", StringComparison.OrdinalIgnoreCase));
+
+        AssertTrue(CodexSessionEventMapper.TryMapJsonLine(
+            """{"type":"response_item","payload":{"type":"function_call_output","output":"secret output"}}""",
+            out var toolOutput));
+        AssertEqual(CoderAgentPhase.Reasoning, toolOutput.Phase);
+        AssertEqual("Reviewing tool result", toolOutput.Message);
+        AssertFalse(toolOutput.Message.Contains("secret", StringComparison.OrdinalIgnoreCase));
+
+        AssertTrue(CodexSessionEventMapper.TryMapJsonLine(
+            """{"type":"event_msg","payload":{"type":"task_complete"}}""",
+            out var taskComplete));
+        AssertEqual(CoderAgentPhase.Success, taskComplete.Phase);
+        AssertEqual(10, taskComplete.TtlSeconds);
+
+        AssertFalse(CodexSessionEventMapper.TryMapJsonLine("{ this is not json", out _));
+        return Task.CompletedTask;
+    }
+
+    private static async Task TestCodexSessionStatusBridgeAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-codex-bridge-{Guid.NewGuid():N}");
+        var statusDirectory = Path.Combine(directory, "status");
+        var sessionsRoot = Path.Combine(directory, "sessions");
+        var sessionDay = Path.Combine(sessionsRoot, "2026", "05", "18");
+        Directory.CreateDirectory(sessionDay);
+
+        var oldSession = Path.Combine(sessionDay, "rollout-2026-05-18T09-00-00-old.jsonl");
+        await File.WriteAllTextAsync(oldSession, string.Empty).ConfigureAwait(false);
+        File.SetLastWriteTimeUtc(oldSession, DateTime.UtcNow.AddMinutes(-5));
+
+        using var bridge = new CodexSessionStatusBridge(statusDirectory, sessionsRoot);
+        bridge.Start();
+        AssertEqual(oldSession, bridge.ActiveSessionPath);
+
+        var newSession = Path.Combine(sessionDay, "rollout-2026-05-18T10-00-00-new.jsonl");
+        await File.WriteAllTextAsync(
+                newSession,
+                """{"type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"Get-Content secret.txt"}}""" + Environment.NewLine)
+            .ConfigureAwait(false);
+
+        var toolStatus = await WaitForCoderStatusAsync(statusDirectory, CoderAgentPhase.ToolCalling, TimeSpan.FromSeconds(5))
+            .ConfigureAwait(false);
+        AssertEqual("Using shell_command", toolStatus.Message);
+        AssertFalse(toolStatus.Message?.Contains("secret", StringComparison.OrdinalIgnoreCase) ?? false);
+        AssertEqual(newSession, bridge.ActiveSessionPath);
+
+        await File.AppendAllTextAsync(
+                newSession,
+                "{ this is not json" + Environment.NewLine +
+                """{"type":"response_item","payload":{"type":"function_call_output","output":"secret output"}}""" + Environment.NewLine)
+            .ConfigureAwait(false);
+
+        var reasoningStatus = await WaitForCoderStatusAsync(statusDirectory, CoderAgentPhase.Reasoning, TimeSpan.FromSeconds(5))
+            .ConfigureAwait(false);
+        AssertEqual("Reviewing tool result", reasoningStatus.Message);
+        AssertFalse(reasoningStatus.Message?.Contains("secret", StringComparison.OrdinalIgnoreCase) ?? false);
+
+        bridge.Dispose();
+        Directory.Delete(directory, recursive: true);
+    }
+
     private static Task TestPetResolverPhasePriorityAsync()
     {
         var resolver = new PetStateResolver();
@@ -304,6 +384,65 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestPetResolverChargingBadgeRotationAsync()
+    {
+        var battery = new BatteryInfo(
+            80,
+            IsAcConnected: true,
+            IsAvailable: true,
+            ChargeRateInMilliwatts: 24000,
+            RemainingCapacityInMilliwattHours: 32000,
+            FullChargeCapacityInMilliwattHours: 46000,
+            EstimatedTimeToFull: TimeSpan.FromMinutes(35));
+
+        var resolver = new PetStateResolver();
+        var powerState = resolver.Resolve(
+            CreateStatus(battery: battery),
+            Array.Empty<CoderAgentStatus>(),
+            isHyperGuardRunning: false,
+            DateTimeOffset.FromUnixTimeSeconds(0));
+        var etaState = resolver.Resolve(
+            CreateStatus(battery: battery),
+            Array.Empty<CoderAgentStatus>(),
+            isHyperGuardRunning: false,
+            DateTimeOffset.FromUnixTimeSeconds(4));
+
+        AssertEqual("80% +24W", GetBatteryBadgeText(powerState));
+        AssertEqual("80% ≈35m", GetBatteryBadgeText(etaState));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverChargingBadgeFallbackAsync()
+    {
+        var missingEstimate = new BatteryInfo(
+            80,
+            IsAcConnected: true,
+            IsAvailable: true,
+            ChargeRateInMilliwatts: 24000);
+        var onBattery = new BatteryInfo(
+            80,
+            IsAcConnected: false,
+            IsAvailable: true,
+            ChargeRateInMilliwatts: 24000,
+            EstimatedTimeToFull: TimeSpan.FromMinutes(35));
+
+        var resolver = new PetStateResolver();
+        var missingEstimateState = resolver.Resolve(
+            CreateStatus(battery: missingEstimate),
+            Array.Empty<CoderAgentStatus>(),
+            isHyperGuardRunning: false,
+            DateTimeOffset.FromUnixTimeSeconds(0));
+        var onBatteryState = resolver.Resolve(
+            CreateStatus(battery: onBattery),
+            Array.Empty<CoderAgentStatus>(),
+            isHyperGuardRunning: false,
+            DateTimeOffset.FromUnixTimeSeconds(0));
+
+        AssertEqual("80% AC", GetBatteryBadgeText(missingEstimateState));
+        AssertEqual("80%", GetBatteryBadgeText(onBatteryState));
+        return Task.CompletedTask;
+    }
+
     private static Task TestCompositeCoderSourceAsync()
     {
         var now = DateTimeOffset.UtcNow;
@@ -336,6 +475,7 @@ internal static class Program
         AssertEqual(0, status.ExitCode);
         var json = JsonNode.Parse(status.StandardOutput) ?? throw new InvalidOperationException("Expected pet status JSON.");
         AssertEqual("reasoning", json["pet"]?["mood"]?.GetValue<string>());
+        AssertNotNull(json["battery"]);
 
         var toolAlias = await RunDotnetAsync(
             repoRoot,
@@ -384,11 +524,85 @@ internal static class Program
             var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
             var result = await RunProcessAsync(
                     GetDotnetPath(),
-                    $"\"{guiDll}\" --smoke --status-dir \"{directory}\" --placement-path \"{Path.Combine(directory, "placement.json")}\"",
+                    $"\"{guiDll}\" --smoke --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{Path.Combine(directory, "placement.json")}\"",
                     repoRoot,
                     TimeSpan.FromSeconds(20))
                 .ConfigureAwait(false);
             AssertEqual(0, result.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task TestGuiCodexMonitorDefaultAndOptOutAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-gui-codex-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var enabledStatusDirectory = Path.Combine(directory, "enabled-status");
+        var disabledStatusDirectory = Path.Combine(directory, "disabled-status");
+        var sessionsRoot = Path.Combine(directory, "sessions");
+        var sessionDay = Path.Combine(sessionsRoot, "2026", "05", "18");
+        Directory.CreateDirectory(sessionDay);
+
+        try
+        {
+            var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+
+            using (var enabled = Process.Start(new ProcessStartInfo
+            {
+                FileName = GetDotnetPath(),
+                Arguments = $"\"{guiDll}\" --status-dir \"{enabledStatusDirectory}\" --placement-path \"{Path.Combine(directory, "enabled-placement.json")}\" --codex-sessions-dir \"{sessionsRoot}\"",
+                WorkingDirectory = repoRoot,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI."))
+            {
+                try
+                {
+                    await WaitForPetSnapshotAnyAsync(enabledStatusDirectory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    var enabledSession = Path.Combine(sessionDay, "rollout-2026-05-18T10-00-00-enabled.jsonl");
+                    await File.WriteAllTextAsync(
+                            enabledSession,
+                            """{"type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"Get-Content secret.txt"}}""" + Environment.NewLine)
+                        .ConfigureAwait(false);
+
+                    await WaitForPetSnapshotAsync(enabledStatusDirectory, "tool_calling", TimeSpan.FromSeconds(10))
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    KillProcessTree(enabled);
+                }
+            }
+
+            using (var disabled = Process.Start(new ProcessStartInfo
+            {
+                FileName = GetDotnetPath(),
+                Arguments = $"\"{guiDll}\" --status-dir \"{disabledStatusDirectory}\" --placement-path \"{Path.Combine(directory, "disabled-placement.json")}\" --codex-sessions-dir \"{sessionsRoot}\" --no-codex-monitor",
+                WorkingDirectory = repoRoot,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI."))
+            {
+                try
+                {
+                    await WaitForPetSnapshotAnyAsync(disabledStatusDirectory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    var disabledSession = Path.Combine(sessionDay, "rollout-2026-05-18T10-00-01-disabled.jsonl");
+                    await File.WriteAllTextAsync(
+                            disabledSession,
+                            """{"type":"response_item","payload":{"type":"function_call","name":"shell_command"}}""" + Environment.NewLine)
+                        .ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromSeconds(1.5)).ConfigureAwait(false);
+                    AssertFalse(File.Exists(CoderStatusPaths.GetStatusPath(disabledStatusDirectory, "codex")));
+                }
+                finally
+                {
+                    KillProcessTree(disabled);
+                }
+            }
         }
         finally
         {
@@ -413,7 +627,7 @@ internal static class Program
         using var process = Process.Start(new ProcessStartInfo
         {
             FileName = GetDotnetPath(),
-            Arguments = $"\"{guiDll}\" --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            Arguments = $"\"{guiDll}\" --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
             WorkingDirectory = repoRoot,
             UseShellExecute = false,
             CreateNoWindow = true
@@ -492,6 +706,12 @@ internal static class Program
             ProcessId: null,
             updatedAtUtc ?? DateTimeOffset.UtcNow,
             TtlSeconds: 120);
+    }
+
+    private static string GetBatteryBadgeText(PetState state)
+    {
+        return state.Badges.FirstOrDefault(static badge => badge.Kind == PetBadgeKind.Battery)?.Text
+            ?? throw new InvalidOperationException("Expected battery badge.");
     }
 
     private static string FindRepoRoot()
@@ -628,6 +848,54 @@ internal static class Program
             await errorTask.ConfigureAwait(false));
     }
 
+    private static async Task<CoderAgentStatus> WaitForCoderStatusAsync(
+        string statusDirectory,
+        CoderAgentPhase expectedPhase,
+        TimeSpan timeout)
+    {
+        var source = new JsonFileCoderStatusSource(statusDirectory);
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var status = source.GetStatuses(DateTimeOffset.UtcNow)
+                .FirstOrDefault(static status => string.Equals(status.Agent, "codex", StringComparison.OrdinalIgnoreCase));
+            if (status?.Phase == expectedPhase)
+            {
+                return status;
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Coder status did not reach phase '{expectedPhase}' within {timeout.TotalSeconds} seconds.");
+    }
+
+    private static async Task<JsonNode> WaitForPetSnapshotAnyAsync(
+        string statusDirectory,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    return JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false)) ??
+                        throw new InvalidOperationException("Expected snapshot JSON.");
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(250).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet snapshot was not written within {timeout.TotalSeconds} seconds.");
+    }
+
     private static async Task<JsonNode> WaitForPetSnapshotAsync(
         string statusDirectory,
         string expectedMood,
@@ -674,6 +942,17 @@ internal static class Program
         {
             throw new InvalidOperationException($"Expected pet near bottom-right, got left={left}, top={top}, width={width}, height={height}.");
         }
+    }
+
+    private static void KillProcessTree(Process process)
+    {
+        if (process.HasExited)
+        {
+            return;
+        }
+
+        process.Kill(entireProcessTree: true);
+        process.WaitForExit(5000);
     }
 
     private static async Task AssertThrowsAsync<TException>(Func<Task> action)

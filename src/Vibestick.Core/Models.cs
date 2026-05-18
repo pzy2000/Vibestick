@@ -28,7 +28,11 @@ public sealed record StateLoadResult(
 public sealed record BatteryInfo(
     int? Percentage,
     bool IsAcConnected,
-    bool IsAvailable);
+    bool IsAvailable,
+    int? ChargeRateInMilliwatts = null,
+    int? RemainingCapacityInMilliwattHours = null,
+    int? FullChargeCapacityInMilliwattHours = null,
+    TimeSpan? EstimatedTimeToFull = null);
 
 public enum SafetyAction
 {
@@ -101,4 +105,3 @@ public sealed record DoctorCheck(
 public sealed record DoctorReport(
     bool IsHealthy,
     IReadOnlyList<DoctorCheck> Checks);
-

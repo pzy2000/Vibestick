@@ -10,6 +10,7 @@ public sealed record GuiServices(
     ISleepBlocker SleepBlocker,
     VibestickOptions Options,
     ICoderStatusSource CoderStatusSource,
+    CodexSessionStatusBridge? CodexStatusBridge,
     PetStateResolver PetStateResolver,
     string CoderStatusDirectory);
 
@@ -20,7 +21,10 @@ public sealed class GuiRuntimeState
 
 public static class GuiServiceFactory
 {
-    public static GuiServices Create(string? coderStatusDirectory = null)
+    public static GuiServices Create(
+        string? coderStatusDirectory = null,
+        bool enableCodexMonitor = true,
+        string? codexSessionsRoot = null)
     {
         var options = new VibestickOptions();
         var commandRunner = new ProcessCommandRunner();
@@ -35,6 +39,9 @@ public static class GuiServiceFactory
         var coderStatusSource = new CompositeCoderStatusSource(
             new JsonFileCoderStatusSource(resolvedCoderStatusDirectory),
             new ProcessCoderStatusSource(processInspector, options.LongTaskProcessNames));
+        var codexStatusBridge = enableCodexMonitor
+            ? new CodexSessionStatusBridge(resolvedCoderStatusDirectory, codexSessionsRoot)
+            : null;
         var petStateResolver = new PetStateResolver(options);
 
         return new GuiServices(
@@ -45,6 +52,7 @@ public static class GuiServiceFactory
             sleepBlocker,
             options,
             coderStatusSource,
+            codexStatusBridge,
             petStateResolver,
             resolvedCoderStatusDirectory);
     }

@@ -9,6 +9,8 @@ public interface IBatteryMonitor
 
 public sealed class WindowsBatteryMonitor : IBatteryMonitor
 {
+    private const int SystemBatteryStateInformationLevel = 5;
+
     public BatteryInfo GetBatteryInfo()
     {
         if (!OperatingSystem.IsWindows())
@@ -25,13 +27,85 @@ public sealed class WindowsBatteryMonitor : IBatteryMonitor
         int? percentage = status.BatteryLifePercent == 255 ? null : status.BatteryLifePercent;
         var isAvailable = status.ACLineStatus != 255 || percentage.HasValue;
 
-        return new BatteryInfo(percentage, isAcConnected, isAvailable);
+        if (!isAvailable || !TryGetSystemBatteryState(out var batteryState) || batteryState.BatteryPresent == 0)
+        {
+            return new BatteryInfo(percentage, isAcConnected, isAvailable);
+        }
+
+        var isCharging = isAcConnected && batteryState.Charging != 0 && batteryState.Rate > 0;
+        int? chargeRate = isCharging ? batteryState.Rate : null;
+        var remainingCapacity = ToCapacity(batteryState.RemainingCapacity);
+        var fullChargeCapacity = ToCapacity(batteryState.MaxCapacity);
+        var estimatedTimeToFull = CalculateEstimatedTimeToFull(
+            isCharging,
+            chargeRate,
+            remainingCapacity,
+            fullChargeCapacity);
+
+        return new BatteryInfo(
+            percentage,
+            isAcConnected,
+            isAvailable,
+            chargeRate,
+            remainingCapacity,
+            fullChargeCapacity,
+            estimatedTimeToFull);
+    }
+
+    private static int? ToCapacity(uint capacity)
+    {
+        return capacity is > 0 and < int.MaxValue ? (int)capacity : null;
+    }
+
+    private static TimeSpan? CalculateEstimatedTimeToFull(
+        bool isCharging,
+        int? chargeRate,
+        int? remainingCapacity,
+        int? fullChargeCapacity)
+    {
+        if (!isCharging ||
+            chargeRate is null or <= 0 ||
+            remainingCapacity is null ||
+            fullChargeCapacity is null ||
+            fullChargeCapacity <= remainingCapacity)
+        {
+            return null;
+        }
+
+        var remainingMilliwattHours = fullChargeCapacity.Value - remainingCapacity.Value;
+        var hours = remainingMilliwattHours / (double)chargeRate.Value;
+        if (double.IsNaN(hours) || double.IsInfinity(hours) || hours <= 0)
+        {
+            return null;
+        }
+
+        return TimeSpan.FromHours(hours);
+    }
+
+    private static bool TryGetSystemBatteryState(out SystemBatteryState state)
+    {
+        state = default;
+        var result = NativeMethods.CallNtPowerInformation(
+            SystemBatteryStateInformationLevel,
+            IntPtr.Zero,
+            0,
+            out state,
+            Marshal.SizeOf<SystemBatteryState>());
+        return result == 0;
     }
 
     private static class NativeMethods
     {
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool GetSystemPowerStatus(out SystemPowerStatus status);
+
+        [DllImport("powrprof.dll", SetLastError = true)]
+        internal static extern uint CallNtPowerInformation(
+            int informationLevel,
+            IntPtr inputBuffer,
+            int inputBufferLength,
+            out SystemBatteryState outputBuffer,
+            int outputBufferLength);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -43,6 +117,25 @@ public sealed class WindowsBatteryMonitor : IBatteryMonitor
         public byte SystemStatusFlag;
         public int BatteryLifeTime;
         public int BatteryFullLifeTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SystemBatteryState
+    {
+        public byte AcOnLine;
+        public byte BatteryPresent;
+        public byte Charging;
+        public byte Discharging;
+        public byte Spare1;
+        public byte Spare2;
+        public byte Spare3;
+        public byte Tag;
+        public uint MaxCapacity;
+        public uint RemainingCapacity;
+        public int Rate;
+        public uint EstimatedTime;
+        public uint DefaultAlert1;
+        public uint DefaultAlert2;
     }
 }
 
@@ -97,4 +190,3 @@ public sealed class BatterySafetyPolicy
         return new BatterySafetyDecision(SafetyAction.KeepHyper, $"Battery is {percentage}%.");
     }
 }
-

@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace Vibestick.Core;
 
 public sealed class PetStateResolver
@@ -43,7 +45,7 @@ public sealed class PetStateResolver
             message,
             primaryCoder,
             orderedCoders,
-            BuildBadges(vibestickStatus, isHyperGuardRunning, batteryDecision),
+            BuildBadges(vibestickStatus, isHyperGuardRunning, batteryDecision, updatedAtUtc),
             updatedAtUtc);
     }
 
@@ -150,7 +152,8 @@ public sealed class PetStateResolver
     private static IReadOnlyList<PetBadge> BuildBadges(
         VibestickStatus status,
         bool isHyperGuardRunning,
-        BatterySafetyDecision batteryDecision)
+        BatterySafetyDecision batteryDecision,
+        DateTimeOffset now)
     {
         var badges = new List<PetBadge>
         {
@@ -164,8 +167,7 @@ public sealed class PetStateResolver
 
         if (status.Battery.IsAvailable)
         {
-            var percent = status.Battery.Percentage.HasValue ? $"{status.Battery.Percentage.Value}%" : "Battery ?";
-            badges.Add(new PetBadge(PetBadgeKind.Battery, status.Battery.IsAcConnected ? $"{percent} AC" : percent));
+            badges.Add(new PetBadge(PetBadgeKind.Battery, BuildBatteryBadgeText(status.Battery, now)));
         }
 
         if (batteryDecision.Action == SafetyAction.Warn)
@@ -179,5 +181,53 @@ public sealed class PetStateResolver
         }
 
         return badges;
+    }
+
+    private static string BuildBatteryBadgeText(BatteryInfo battery, DateTimeOffset now)
+    {
+        var percent = battery.Percentage.HasValue ? $"{battery.Percentage.Value}%" : "Battery ?";
+        if (!battery.IsAcConnected)
+        {
+            return percent;
+        }
+
+        var powerText = FormatChargePower(battery.ChargeRateInMilliwatts);
+        var etaText = FormatTimeToFull(battery.EstimatedTimeToFull);
+        if (powerText is null || etaText is null)
+        {
+            return $"{percent} AC";
+        }
+
+        var showPower = (now.ToUnixTimeSeconds() / 4) % 2 == 0;
+        return showPower ? $"{percent} {powerText}" : $"{percent} {etaText}";
+    }
+
+    private static string? FormatChargePower(int? chargeRateInMilliwatts)
+    {
+        if (chargeRateInMilliwatts is null or <= 0)
+        {
+            return null;
+        }
+
+        var watts = chargeRateInMilliwatts.Value / 1000d;
+        return $"+{watts.ToString(watts >= 10 ? "0" : "0.#", CultureInfo.InvariantCulture)}W";
+    }
+
+    private static string? FormatTimeToFull(TimeSpan? estimatedTimeToFull)
+    {
+        if (estimatedTimeToFull is null || estimatedTimeToFull.Value <= TimeSpan.Zero)
+        {
+            return null;
+        }
+
+        var totalMinutes = Math.Max(1, (int)Math.Ceiling(estimatedTimeToFull.Value.TotalMinutes));
+        if (totalMinutes < 60)
+        {
+            return $"≈{totalMinutes}m";
+        }
+
+        var hours = totalMinutes / 60;
+        var minutes = totalMinutes % 60;
+        return minutes == 0 ? $"≈{hours}h" : $"≈{hours}h{minutes}m";
     }
 }
