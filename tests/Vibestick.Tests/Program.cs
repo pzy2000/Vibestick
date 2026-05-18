@@ -38,6 +38,7 @@ internal static class Program
             ("Process coder source treats idle Codex as sleeping", TestProcessCoderSourceCodexSleepingAsync),
             ("CLI coder emit, pet status, and clear smoke", TestCliCoderStatusSmokeAsync),
             ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
+            ("GUI control panel shows all default actions", TestGuiPanelActionsVisibleAsync),
             ("GUI Codex monitor starts by default and can be disabled", TestGuiCodexMonitorDefaultAndOptOutAsync),
             ("Desktop pet e2e reflects state and bottom-right placement", TestDesktopPetE2EAsync),
             ("Desktop pet e2e renders collapsed multi-session cards", TestDesktopPetMultiSessionE2EAsync)
@@ -735,6 +736,55 @@ internal static class Program
         }
     }
 
+    private static async Task TestGuiPanelActionsVisibleAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-gui-panel-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var publishDirectory = Path.Combine(directory, "publish");
+        var layoutPath = Path.Combine(directory, "panel-layout.json");
+
+        try
+        {
+            var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+            var result = await RunProcessAsync(
+                    GetDotnetPath(),
+                    $"\"{guiDll}\" --panel --smoke --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{Path.Combine(directory, "placement.json")}\" --panel-layout-snapshot \"{layoutPath}\"",
+                    repoRoot,
+                    TimeSpan.FromSeconds(20))
+                .ConfigureAwait(false);
+            AssertEqual(0, result.ExitCode);
+
+            if (!File.Exists(layoutPath))
+            {
+                throw new InvalidOperationException("Expected control panel layout snapshot.");
+            }
+
+            var layout = JsonNode.Parse(await File.ReadAllTextAsync(layoutPath).ConfigureAwait(false)) ??
+                throw new InvalidOperationException("Expected control panel layout JSON.");
+            var buttons = layout["Buttons"]?.AsArray() ??
+                throw new InvalidOperationException("Expected control panel button layout entries.");
+            AssertEqual(6, buttons.Count);
+
+            foreach (var action in new[]
+            {
+                "Refresh Status",
+                "Run Doctor",
+                "Mode ON",
+                "Mode HYPER",
+                "Stop HYPER Guard",
+                "OFF / Revert"
+            })
+            {
+                AssertPanelActionVisible(buttons, action);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static async Task TestGuiCodexMonitorDefaultAndOptOutAsync()
     {
         var repoRoot = FindRepoRoot();
@@ -1247,6 +1297,16 @@ internal static class Program
         }
 
         throw new TimeoutException($"Pet task cards did not reach total={total}, visible={visible}, hidden={hidden} within {timeout.TotalSeconds} seconds.");
+    }
+
+    private static void AssertPanelActionVisible(JsonArray buttons, string text)
+    {
+        var button = buttons.FirstOrDefault(node => node?["Text"]?.GetValue<string>() == text) ??
+            throw new InvalidOperationException($"Expected control panel action '{text}'.");
+        AssertEqual(true, button["IsVisible"]?.GetValue<bool>());
+        AssertEqual(true, button["FitsWithinWindow"]?.GetValue<bool>());
+        AssertTrue(button["Width"]?.GetValue<double>() >= 100);
+        AssertTrue(button["Height"]?.GetValue<double>() >= 30);
     }
 
     private static void AssertNearBottomRight(JsonNode snapshot)

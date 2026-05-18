@@ -1,8 +1,10 @@
 using System.Globalization;
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Vibestick.Core;
@@ -29,6 +31,7 @@ public sealed class App : Application
     private MainWindow? _mainWindow;
     private Forms.NotifyIcon? _notifyIcon;
     private string? _placementPath;
+    private string? _panelLayoutSnapshotPath;
 
     public App(string[] args)
     {
@@ -52,6 +55,7 @@ public sealed class App : Application
         var codexSessionsRoot = GetOption(_args, "--codex-sessions-dir") ??
             Environment.GetEnvironmentVariable("VIBESTICK_CODEX_SESSIONS_DIR");
         _placementPath = GetOption(_args, "--placement-path");
+        _panelLayoutSnapshotPath = GetOption(_args, "--panel-layout-snapshot");
         _services = GuiServiceFactory.Create(
             statusDirectory,
             enableCodexMonitor: !HasFlag(_args, "--no-codex-monitor"),
@@ -124,7 +128,7 @@ public sealed class App : Application
             return;
         }
 
-        _mainWindow = new MainWindow(_services, _runtimeState);
+        _mainWindow = new MainWindow(_services, _runtimeState, _panelLayoutSnapshotPath);
         _mainWindow.Closed += (_, _) => _mainWindow = null;
         _mainWindow.Show();
     }
@@ -201,11 +205,13 @@ public sealed class MainWindow : Window
     private DateTimeOffset? _guardStartedAt;
     private DateTimeOffset? _lastRefreshAt;
     private DateTimeOffset? _lastSafetyCheckAt;
+    private readonly string? _panelLayoutSnapshotPath;
 
-    public MainWindow(GuiServices services, GuiRuntimeState runtimeState)
+    public MainWindow(GuiServices services, GuiRuntimeState runtimeState, string? panelLayoutSnapshotPath = null)
     {
         _services = services;
         _runtimeState = runtimeState;
+        _panelLayoutSnapshotPath = panelLayoutSnapshotPath;
         _hyperTimer = new DispatcherTimer
         {
             Interval = _services.Options.HyperGuardInterval
@@ -230,6 +236,7 @@ public sealed class MainWindow : Window
         {
             _watchTimer.Start();
             await RefreshStatusAsync("Ready.").ConfigureAwait(true);
+            await WritePanelLayoutSnapshotAsync().ConfigureAwait(true);
         };
         Closed += async (_, _) =>
         {
@@ -303,13 +310,17 @@ public sealed class MainWindow : Window
         {
             Margin = new Thickness(0, 18, 0, 0)
         };
-        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(250) });
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         Grid.SetRow(body, 3);
         root.Children.Add(body);
 
-        var controls = new StackPanel();
+        var controls = new UniformGrid
+        {
+            Columns = 2,
+            Rows = 3
+        };
         AddActionButton(controls, _refreshButton, "Refresh Status", async () => await RefreshStatusAsync("Status refreshed.").ConfigureAwait(true));
         AddActionButton(controls, _doctorButton, "Run Doctor", RunDoctorAsync);
         AddActionButton(controls, _onButton, "Mode ON", async () => await ApplyModeAsync(VibestickMode.On, startGuard: false).ConfigureAwait(true));
@@ -472,16 +483,80 @@ public sealed class MainWindow : Window
         bool isPrimary = false)
     {
         button.Content = text;
-        button.Height = 38;
-        button.Margin = new Thickness(0, 0, 0, 10);
+        button.Height = 40;
+        button.Margin = new Thickness(4, 0, 4, 8);
+        button.Padding = new Thickness(8, 0, 8, 0);
+        button.MinWidth = 0;
         button.FontWeight = FontWeights.SemiBold;
         button.Background = isPrimary ? Brush("#6d5dfc") : Brush("#eef2ff");
         button.Foreground = isPrimary ? Brushes.White : Brush("#29324a");
         button.BorderBrush = isPrimary ? Brush("#6d5dfc") : Brush("#cdd6f6");
         button.BorderThickness = new Thickness(1);
+        button.HorizontalContentAlignment = System.Windows.HorizontalAlignment.Center;
+        button.VerticalContentAlignment = System.Windows.VerticalAlignment.Center;
         button.Cursor = System.Windows.Input.Cursors.Hand;
         button.Click += async (_, _) => await action().ConfigureAwait(true);
         panel.Children.Add(button);
+    }
+
+    private async Task WritePanelLayoutSnapshotAsync()
+    {
+        if (_panelLayoutSnapshotPath is null)
+        {
+            return;
+        }
+
+        var snapshot = new PanelLayoutSnapshot(
+            Width,
+            Height,
+            ActualWidth,
+            ActualHeight,
+            new[]
+            {
+                CaptureButtonLayout(_refreshButton),
+                CaptureButtonLayout(_doctorButton),
+                CaptureButtonLayout(_onButton),
+                CaptureButtonLayout(_hyperButton),
+                CaptureButtonLayout(_stopHyperButton),
+                CaptureButtonLayout(_revertButton)
+            });
+
+        var directory = Path.GetDirectoryName(_panelLayoutSnapshotPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        await File.WriteAllTextAsync(
+                _panelLayoutSnapshotPath,
+                JsonSerializer.Serialize(snapshot, JsonOptions))
+            .ConfigureAwait(true);
+    }
+
+    private ButtonLayoutSnapshot CaptureButtonLayout(Button button)
+    {
+        var bounds = button.TransformToAncestor(this).TransformBounds(
+            new Rect(0, 0, button.ActualWidth, button.ActualHeight));
+        var clientBounds = new Rect(0, 0, ActualWidth, ActualHeight);
+        var fitsWithinWindow =
+            button.IsVisible &&
+            button.ActualWidth > 0 &&
+            button.ActualHeight > 0 &&
+            bounds.Left >= clientBounds.Left &&
+            bounds.Top >= clientBounds.Top &&
+            bounds.Right <= clientBounds.Right &&
+            bounds.Bottom <= clientBounds.Bottom;
+
+        return new ButtonLayoutSnapshot(
+            button.Content?.ToString() ?? string.Empty,
+            button.IsVisible,
+            button.ActualWidth,
+            button.ActualHeight,
+            bounds.Left,
+            bounds.Top,
+            bounds.Right,
+            bounds.Bottom,
+            fitsWithinWindow);
     }
 
     private async Task RefreshStatusAsync(string? message = null)
@@ -860,4 +935,22 @@ public sealed class MainWindow : Window
     {
         return new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
     }
+
+    private sealed record PanelLayoutSnapshot(
+        double RequestedWidth,
+        double RequestedHeight,
+        double ActualWidth,
+        double ActualHeight,
+        IReadOnlyList<ButtonLayoutSnapshot> Buttons);
+
+    private sealed record ButtonLayoutSnapshot(
+        string Text,
+        bool IsVisible,
+        double Width,
+        double Height,
+        double Left,
+        double Top,
+        double Right,
+        double Bottom,
+        bool FitsWithinWindow);
 }
