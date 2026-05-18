@@ -61,12 +61,14 @@ Useful integration commands:
 
 ```powershell
 .\scripts\vibestick.ps1 pet status --json
-.\scripts\vibestick.ps1 coder emit --agent codex --phase reasoning --message "Thinking through the patch" --ttl 120 --json
+.\scripts\vibestick.ps1 coder emit --agent codex --phase reasoning --message "Reading pet state code" --ttl 30 --json
+.\scripts\vibestick.ps1 coder emit --agent codex --phase tool_calling --message "Running rg for status resolver" --ttl 30 --json
+.\scripts\vibestick.ps1 coder emit --agent codex --phase success --message "Patch complete" --ttl 30 --json
 .\scripts\vibestick.ps1 coder emit --agent codex --phase waiting_authorization --message "Approval needed" --ttl 120 --json
 .\scripts\vibestick.ps1 coder clear --agent codex --json
 ```
 
-Supported coder phases are `idle`, `running`, `reasoning`, `waiting_authorization`, `error`, `success`, `offline`, and `unknown`. The pet maps them to its mascot moods, with power and battery safety warnings overriding coder animation only when they need attention.
+Supported coder phases are `idle`, `running`, `reasoning`, `tool_calling`, `waiting_authorization`, `error`, `success`, `offline`, and `unknown`. The pet maps them to its mascot moods, with power and battery safety warnings overriding coder animation only when they need attention.
 
 ## State
 

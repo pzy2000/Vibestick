@@ -18,8 +18,10 @@ internal static class Program
             ("HYPER restores normal sleep below critical battery threshold", TestHyperRestoresOnCriticalBatteryAsync),
             ("Long task detector matches normalized process names", TestLongTaskDetectorAsync),
             ("Json state store recovers from corrupted state", TestCorruptedStateRecoveryAsync),
-            ("Coder status adapter parses snake case and ignores stale entries", TestCoderStatusAdapterAsync),
+            ("Coder status adapter parses tool_calling and ignores stale entries", TestCoderStatusAdapterAsync),
             ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
+            ("Pet resolver maps tool calling mood", TestPetResolverToolCallingAsync),
+            ("Pet resolver prioritizes tool calling over reasoning and running", TestPetResolverToolCallingPriorityAsync),
             ("Pet resolver falls back to idle without coders", TestPetResolverIdleFallbackAsync),
             ("Pet resolver lets critical power override coder mood", TestPetResolverPowerOverrideAsync),
             ("Composite coder source prefers adapter status over process fallback", TestCompositeCoderSourceAsync),
@@ -190,8 +192,8 @@ internal static class Program
             """
             {
               "agent": "codex",
-              "phase": "waiting_authorization",
-              "message": "Approval needed",
+              "phase": "tool_calling",
+              "message": "Running rg",
               "workspace": "C:\\repo",
               "processId": 123,
               "updatedAtUtc": "2026-05-18T09:59:30Z",
@@ -213,8 +215,8 @@ internal static class Program
         var statuses = new JsonFileCoderStatusSource(directory).GetStatuses(now);
         AssertEqual(1, statuses.Count);
         AssertEqual("codex", statuses[0].Agent);
-        AssertEqual(CoderAgentPhase.WaitingAuthorization, statuses[0].Phase);
-        AssertEqual("Approval needed", statuses[0].Message);
+        AssertEqual(CoderAgentPhase.ToolCalling, statuses[0].Phase);
+        AssertEqual("Running rg", statuses[0].Message);
 
         Directory.Delete(directory, recursive: true);
         return Task.CompletedTask;
@@ -236,6 +238,40 @@ internal static class Program
         AssertEqual(PetMood.Error, state.Mood);
         AssertEqual("claude", state.PrimaryCoder?.Agent);
         AssertEqual("Build failed", state.Message);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverToolCallingAsync()
+    {
+        var state = new PetStateResolver().Resolve(
+            CreateStatus(),
+            new[] { CreateCoder("codex", CoderAgentPhase.ToolCalling) },
+            isHyperGuardRunning: false,
+            DateTimeOffset.UtcNow);
+
+        AssertEqual(PetMood.ToolCalling, state.Mood);
+        AssertEqual("Codex is using a tool", state.Title);
+        AssertEqual("The coder is using a tool.", state.Message);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetResolverToolCallingPriorityAsync()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = new PetStateResolver().Resolve(
+            CreateStatus(),
+            new[]
+            {
+                CreateCoder("codex", CoderAgentPhase.Running, updatedAtUtc: now.AddSeconds(2)),
+                CreateCoder("codex", CoderAgentPhase.Reasoning, updatedAtUtc: now.AddSeconds(1)),
+                CreateCoder("codex", CoderAgentPhase.ToolCalling, "Running rg", updatedAtUtc: now)
+            },
+            isHyperGuardRunning: false,
+            now);
+
+        AssertEqual(PetMood.ToolCalling, state.Mood);
+        AssertEqual(CoderAgentPhase.ToolCalling, state.PrimaryCoder?.Phase);
+        AssertEqual("Running rg", state.Message);
         return Task.CompletedTask;
     }
 
@@ -301,6 +337,30 @@ internal static class Program
         var json = JsonNode.Parse(status.StandardOutput) ?? throw new InvalidOperationException("Expected pet status JSON.");
         AssertEqual("reasoning", json["pet"]?["mood"]?.GetValue<string>());
 
+        var toolAlias = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase tool-calling --message \"tool\" --ttl 60 --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, toolAlias.ExitCode);
+        var toolAliasJson = JsonNode.Parse(toolAlias.StandardOutput) ?? throw new InvalidOperationException("Expected tool alias JSON.");
+        AssertEqual("tool_calling", toolAliasJson["status"]?["phase"]?.GetValue<string>());
+
+        var toolStatus = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- pet status --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, toolStatus.ExitCode);
+        var toolJson = JsonNode.Parse(toolStatus.StandardOutput) ?? throw new InvalidOperationException("Expected tool pet status JSON.");
+        AssertEqual("tool_calling", toolJson["pet"]?["mood"]?.GetValue<string>());
+
+        var compactToolAlias = await RunDotnetAsync(
+            repoRoot,
+            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase toolcalling --message \"tool compact\" --ttl 60 --status-dir \"{directory}\" --json")
+            .ConfigureAwait(false);
+        AssertEqual(0, compactToolAlias.ExitCode);
+        var compactToolJson = JsonNode.Parse(compactToolAlias.StandardOutput) ?? throw new InvalidOperationException("Expected compact tool alias JSON.");
+        AssertEqual("tool_calling", compactToolJson["status"]?["phase"]?.GetValue<string>());
+
         var clear = await RunDotnetAsync(
             repoRoot,
             $"run --project src\\Vibestick.Cli --configuration Release -- coder clear --agent codex --status-dir \"{directory}\" --json")
@@ -364,6 +424,12 @@ internal static class Program
             var reasoning = await WaitForPetSnapshotAsync(directory, "reasoning", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
             AssertNearBottomRight(reasoning);
+
+            await new CoderStatusWriter(directory)
+                .EmitAsync("codex", CoderAgentPhase.ToolCalling, "tool", processId: process.Id, ttlSeconds: 60)
+                .ConfigureAwait(false);
+            await WaitForPetSnapshotAsync(directory, "tool_calling", TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
 
             await new CoderStatusWriter(directory)
                 .EmitAsync("codex", CoderAgentPhase.WaitingAuthorization, "approval", processId: process.Id, ttlSeconds: 60)

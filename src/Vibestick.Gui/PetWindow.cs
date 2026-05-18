@@ -41,7 +41,9 @@ public sealed class PetWindow : Window
     private readonly Action _openControlPanel;
     private readonly Action _exitApplication;
     private readonly DispatcherTimer _statusTimer;
+    private readonly DispatcherTimer _statusDebounceTimer;
     private readonly DispatcherTimer _frameTimer;
+    private readonly System.IO.FileSystemWatcher? _statusWatcher;
     private readonly TextBlock _titleText = new();
     private readonly TextBlock _messageText = new();
     private readonly StackPanel _badgesPanel = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
@@ -104,7 +106,12 @@ public sealed class PetWindow : Window
             ApplyInitialPlacement();
             await RefreshNowAsync().ConfigureAwait(true);
         };
-        Closing += (_, _) => SavePlacement();
+        Closing += (_, _) =>
+        {
+            _statusDebounceTimer.Stop();
+            _statusWatcher?.Dispose();
+            SavePlacement();
+        };
         MouseLeftButtonDown += OnMouseLeftButtonDown;
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnMouseLeftButtonUp;
@@ -112,6 +119,14 @@ public sealed class PetWindow : Window
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _statusTimer.Tick += async (_, _) => await RefreshNowAsync().ConfigureAwait(true);
         _statusTimer.Start();
+
+        _statusDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
+        _statusDebounceTimer.Tick += async (_, _) =>
+        {
+            _statusDebounceTimer.Stop();
+            await RefreshNowAsync().ConfigureAwait(true);
+        };
+        _statusWatcher = CreateStatusWatcher();
 
         _frameTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(420) };
         _frameTimer.Tick += (_, _) => _spriteAnimator.AdvanceFrame();
@@ -229,6 +244,46 @@ public sealed class PetWindow : Window
         exit.Click += (_, _) => _exitApplication();
         menu.Items.Add(exit);
         return menu;
+    }
+
+    private System.IO.FileSystemWatcher? CreateStatusWatcher()
+    {
+        try
+        {
+            Directory.CreateDirectory(_services.CoderStatusDirectory);
+            var watcher = new System.IO.FileSystemWatcher(_services.CoderStatusDirectory, "*.json")
+            {
+                IncludeSubdirectories = false,
+                NotifyFilter = System.IO.NotifyFilters.CreationTime |
+                    System.IO.NotifyFilters.FileName |
+                    System.IO.NotifyFilters.LastWrite |
+                    System.IO.NotifyFilters.Size
+            };
+
+            watcher.Changed += (_, _) => ScheduleStatusRefresh();
+            watcher.Created += (_, _) => ScheduleStatusRefresh();
+            watcher.Deleted += (_, _) => ScheduleStatusRefresh();
+            watcher.Renamed += (_, _) => ScheduleStatusRefresh();
+            watcher.Error += (_, _) => ScheduleStatusRefresh();
+            watcher.EnableRaisingEvents = true;
+            return watcher;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private void ScheduleStatusRefresh()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            _ = Dispatcher.InvokeAsync(ScheduleStatusRefresh);
+            return;
+        }
+
+        _statusDebounceTimer.Stop();
+        _statusDebounceTimer.Start();
     }
 
     private void Render(PetState state)

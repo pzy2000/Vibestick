@@ -87,6 +87,7 @@ public sealed class PetSpriteAnimator
         {
             PetMood.Running => (frameIndex, 1),
             PetMood.Reasoning => (4 + frameIndex, 7),
+            PetMood.ToolCalling => (frameIndex, 1),
             PetMood.WaitingAuthorization => (1 + frameIndex, 3),
             PetMood.Error => (frameIndex, 5),
             PetMood.Success => (1 + frameIndex, 7),

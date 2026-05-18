@@ -64,13 +64,14 @@ public sealed class PetStateResolver
         {
             CoderAgentPhase.Error => 0,
             CoderAgentPhase.WaitingAuthorization => 1,
-            CoderAgentPhase.Reasoning => 2,
-            CoderAgentPhase.Running => 3,
-            CoderAgentPhase.Success => 4,
-            CoderAgentPhase.Offline => 5,
-            CoderAgentPhase.Unknown => 6,
-            CoderAgentPhase.Idle => 7,
-            _ => 8
+            CoderAgentPhase.ToolCalling => 2,
+            CoderAgentPhase.Reasoning => 3,
+            CoderAgentPhase.Running => 4,
+            CoderAgentPhase.Success => 5,
+            CoderAgentPhase.Offline => 6,
+            CoderAgentPhase.Unknown => 7,
+            CoderAgentPhase.Idle => 8,
+            _ => 9
         };
     }
 
@@ -80,6 +81,7 @@ public sealed class PetStateResolver
         {
             CoderAgentPhase.Running => PetMood.Running,
             CoderAgentPhase.Reasoning => PetMood.Reasoning,
+            CoderAgentPhase.ToolCalling => PetMood.ToolCalling,
             CoderAgentPhase.WaitingAuthorization => PetMood.WaitingAuthorization,
             CoderAgentPhase.Error => PetMood.Error,
             CoderAgentPhase.Success => PetMood.Success,
@@ -95,9 +97,18 @@ public sealed class PetStateResolver
             return "Power needs attention";
         }
 
-        return coder is null
-            ? "Vibestick is watching"
-            : $"{coder.Agent}: {coder.Phase}";
+        if (coder is null)
+        {
+            return "Vibestick is watching";
+        }
+
+        var agentName = FormatAgentName(coder.Agent);
+        return mood switch
+        {
+            PetMood.Reasoning => $"{agentName} is thinking",
+            PetMood.ToolCalling => $"{agentName} is using a tool",
+            _ => $"{agentName}: {coder.Phase}"
+        };
     }
 
     private static string GetMessage(
@@ -120,12 +131,20 @@ public sealed class PetStateResolver
         {
             PetMood.Running => "A coder is running in the background.",
             PetMood.Reasoning => "The coder is thinking through the next step.",
+            PetMood.ToolCalling => "The coder is using a tool.",
             PetMood.WaitingAuthorization => "Authorization is needed. Click the pet to bring the coder forward.",
             PetMood.Error => "The coder reported an error.",
             PetMood.Success => "The coder finished successfully.",
             PetMood.Offline => "The coder appears offline.",
             _ => "No active coder state is available."
         };
+    }
+
+    private static string FormatAgentName(string agent)
+    {
+        return string.Equals(agent, "codex", StringComparison.OrdinalIgnoreCase)
+            ? "Codex"
+            : agent;
     }
 
     private static IReadOnlyList<PetBadge> BuildBadges(

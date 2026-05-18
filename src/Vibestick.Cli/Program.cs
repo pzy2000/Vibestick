@@ -237,7 +237,7 @@ internal static class Program
         var phaseValue = GetOption(args, "--phase");
         if (phaseValue is null || !TryParseCoderPhase(phaseValue, out var phase))
         {
-            Console.Error.WriteLine("Missing or invalid --phase. Expected: idle, running, reasoning, waiting_authorization, error, success, offline, unknown.");
+            Console.Error.WriteLine("Missing or invalid --phase. Expected: idle, running, reasoning, tool_calling, waiting_authorization, error, success, offline, unknown.");
             return 1;
         }
 
