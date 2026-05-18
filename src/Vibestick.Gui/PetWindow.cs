@@ -39,9 +39,12 @@ public sealed class PetWindow : Window
     private const double ResizeDragDivisor = 220;
     private const double ResizeHitPadding = 16;
     private const double ResizeHitSpriteYRatio = 0.45;
+    private const double CrawlDirectionThreshold = 0.75;
     private const int CollapsedTaskCardLimit = 3;
     private const double ExpandedTaskListMaxHeight = 220;
     private const double TaskCardWidth = 324;
+    private static readonly TimeSpan MoodFrameInterval = TimeSpan.FromMilliseconds(420);
+    private static readonly TimeSpan CrawlFrameInterval = TimeSpan.FromMilliseconds(140);
 
     private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
     {
@@ -79,6 +82,7 @@ public sealed class PetWindow : Window
     private PetState? _currentState;
     private bool _isRefreshing;
     private Point? _dragStart;
+    private Point? _lastDragPoint;
     private Point _windowStart;
     private bool _isDragging;
     private PointerInteraction _pointerInteraction;
@@ -148,7 +152,7 @@ public sealed class PetWindow : Window
         };
         _statusWatcher = CreateStatusWatcher();
 
-        _frameTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(420) };
+        _frameTimer = new DispatcherTimer { Interval = MoodFrameInterval };
         _frameTimer.Tick += (_, _) => _spriteAnimator.AdvanceFrame();
         _frameTimer.Start();
 
@@ -783,6 +787,7 @@ public sealed class PetWindow : Window
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
     {
         _dragStart = ToScreenDip(args.GetPosition(this));
+        _lastDragPoint = _dragStart;
         _windowStart = new Point(Left, Top);
         _resizeStartScale = _scale;
         _pointerInteraction = IsResizeHit(args) ? PointerInteraction.Resize : PointerInteraction.Move;
@@ -817,6 +822,7 @@ public sealed class PetWindow : Window
             return;
         }
 
+        UpdateCrawlDirection(current, delta);
         Left = _windowStart.X + delta.X;
         Top = _windowStart.Y + delta.Y;
     }
@@ -834,9 +840,35 @@ public sealed class PetWindow : Window
             SavePlacement();
         }
 
+        StopCrawling();
         _dragStart = null;
+        _lastDragPoint = null;
         _isDragging = false;
         Cursor = IsResizeHit(args) ? InputCursors.SizeNWSE : InputCursors.Arrow;
+    }
+
+    private void UpdateCrawlDirection(Point current, Vector totalDelta)
+    {
+        var previous = _lastDragPoint ?? _dragStart ?? current;
+        var stepX = current.X - previous.X;
+        var directionX = Math.Abs(stepX) >= CrawlDirectionThreshold ? stepX : totalDelta.X;
+        _lastDragPoint = current;
+
+        if (Math.Abs(directionX) < CrawlDirectionThreshold)
+        {
+            return;
+        }
+
+        _spriteAnimator.SetCrawlDirection(directionX < 0
+            ? PetSpriteCrawlDirection.Left
+            : PetSpriteCrawlDirection.Right);
+        _frameTimer.Interval = CrawlFrameInterval;
+    }
+
+    private void StopCrawling()
+    {
+        _spriteAnimator.SetCrawlDirection(null);
+        _frameTimer.Interval = MoodFrameInterval;
     }
 
     private void HandlePrimaryClick()
