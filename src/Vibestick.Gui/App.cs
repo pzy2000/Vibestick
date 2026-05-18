@@ -14,7 +14,6 @@ using ColorConverter = System.Windows.Media.ColorConverter;
 using Drawing = System.Drawing;
 using FontFamily = System.Windows.Media.FontFamily;
 using Forms = System.Windows.Forms;
-using ListBox = System.Windows.Controls.ListBox;
 using MessageBox = System.Windows.MessageBox;
 using Panel = System.Windows.Controls.Panel;
 using TextBox = System.Windows.Controls.TextBox;
@@ -185,14 +184,23 @@ public sealed class MainWindow : Window
     private readonly TextBlock _schemeText = new();
     private readonly TextBlock _tasksText = new();
     private readonly TextBlock _guardText = new();
+    private readonly TextBlock _protectionText = new();
+    private readonly TextBlock _batterySafetyText = new();
+    private readonly TextBlock _timingText = new();
+    private readonly TextBlock _doctorSummaryText = new();
     private readonly TextBox _outputBox = new();
-    private readonly ListBox _diagnosticsList = new();
     private readonly Button _refreshButton = new();
     private readonly Button _doctorButton = new();
     private readonly Button _onButton = new();
     private readonly Button _hyperButton = new();
     private readonly Button _stopHyperButton = new();
     private readonly Button _revertButton = new();
+    private readonly DispatcherTimer _watchTimer;
+    private VibestickStatus? _lastStatus;
+    private DoctorReport? _lastDoctorReport;
+    private DateTimeOffset? _guardStartedAt;
+    private DateTimeOffset? _lastRefreshAt;
+    private DateTimeOffset? _lastSafetyCheckAt;
 
     public MainWindow(GuiServices services, GuiRuntimeState runtimeState)
     {
@@ -203,6 +211,11 @@ public sealed class MainWindow : Window
             Interval = _services.Options.HyperGuardInterval
         };
         _hyperTimer.Tick += async (_, _) => await CheckHyperGuardAsync().ConfigureAwait(true);
+        _watchTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _watchTimer.Tick += (_, _) => UpdateHyperWatch();
 
         Title = "Vibestick";
         Width = 980;
@@ -213,8 +226,16 @@ public sealed class MainWindow : Window
         FontFamily = new FontFamily("Segoe UI");
 
         Content = BuildLayout();
-        Loaded += async (_, _) => await RefreshStatusAsync("Ready.").ConfigureAwait(true);
-        Closed += async (_, _) => await ReleaseHyperGuardAsync(updateState: false).ConfigureAwait(true);
+        Loaded += async (_, _) =>
+        {
+            _watchTimer.Start();
+            await RefreshStatusAsync("Ready.").ConfigureAwait(true);
+        };
+        Closed += async (_, _) =>
+        {
+            _watchTimer.Stop();
+            await ReleaseHyperGuardAsync(updateState: false).ConfigureAwait(true);
+        };
     }
 
     private UIElement BuildLayout()
@@ -314,11 +335,7 @@ public sealed class MainWindow : Window
         Grid.SetColumn(outputGrid, 2);
         body.Children.Add(outputGrid);
 
-        _diagnosticsList.Background = Brushes.White;
-        _diagnosticsList.BorderBrush = Brush("#e1e5ee");
-        _diagnosticsList.BorderThickness = new Thickness(1);
-        _diagnosticsList.Padding = new Thickness(8);
-        outputGrid.Children.Add(_diagnosticsList);
+        outputGrid.Children.Add(BuildHyperWatchPanel());
 
         _outputBox.FontFamily = new FontFamily("Consolas");
         _outputBox.FontSize = 12;
@@ -336,6 +353,73 @@ public sealed class MainWindow : Window
 
         SetGuardUi();
         return root;
+    }
+
+    private UIElement BuildHyperWatchPanel()
+    {
+        var content = new Grid();
+        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.25, GridUnitType.Star) });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.15, GridUnitType.Star) });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var title = new TextBlock
+        {
+            Text = "HYPER Watch",
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brush("#172033"),
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        Grid.SetColumnSpan(title, 4);
+        content.Children.Add(title);
+
+        AddWatchSection(content, 0, "Protection", _protectionText);
+        AddWatchSection(content, 1, "Battery Safety", _batterySafetyText);
+        AddWatchSection(content, 2, "Timing", _timingText);
+        AddWatchSection(content, 3, "Doctor Snapshot", _doctorSummaryText);
+
+        return new Border
+        {
+            Background = Brushes.White,
+            BorderBrush = Brush("#e1e5ee"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14),
+            Child = content
+        };
+    }
+
+    private static void AddWatchSection(Grid grid, int column, string label, TextBlock value)
+    {
+        value.FontSize = 12;
+        value.Foreground = Brush("#172033");
+        value.TextWrapping = TextWrapping.Wrap;
+        value.LineHeight = 18;
+
+        var labelBlock = new TextBlock
+        {
+            Text = label,
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brush("#697386"),
+            Margin = new Thickness(0, 0, 0, 6)
+        };
+
+        var section = new StackPanel
+        {
+            Margin = new Thickness(column == 0 ? 0 : 12, 0, column == 3 ? 0 : 12, 0),
+            Children =
+            {
+                labelBlock,
+                value
+            }
+        };
+        Grid.SetRow(section, 1);
+        Grid.SetColumn(section, column);
+        grid.Children.Add(section);
     }
 
     private static void AddMetric(Grid grid, int row, int column, string label, TextBlock value)
@@ -418,12 +502,8 @@ public sealed class MainWindow : Window
         await RunBusyAsync(async () =>
         {
             var report = await _services.Doctor.RunAsync().ConfigureAwait(true);
-            _diagnosticsList.Items.Clear();
-            foreach (var check in report.Checks)
-            {
-                _diagnosticsList.Items.Add($"{(check.Passed ? "OK " : "ERR")} {check.Name}: {check.Message}");
-            }
-
+            _lastDoctorReport = report;
+            UpdateHyperWatch();
             WriteOutput(report.IsHealthy ? "Doctor passed." : "Doctor found issues.", report);
             await RefreshStatusAsync().ConfigureAwait(true);
         }).ConfigureAwait(true);
@@ -465,6 +545,8 @@ public sealed class MainWindow : Window
         StopHyperGuardOnly();
         _sleepBlock = _services.SleepBlocker.BlockSystemSleep();
         _runtimeState.IsHyperGuardRunning = true;
+        _guardStartedAt = DateTimeOffset.Now;
+        _lastSafetyCheckAt = DateTimeOffset.Now;
         _hyperTimer.Start();
         SetGuardUi();
         AppendLog("HYPER guard started. Idle system sleep is blocked while this window stays open.");
@@ -487,6 +569,8 @@ public sealed class MainWindow : Window
         _sleepBlock?.Dispose();
         _sleepBlock = null;
         _runtimeState.IsHyperGuardRunning = false;
+        _guardStartedAt = null;
+        _lastSafetyCheckAt = null;
         SetGuardUi();
     }
 
@@ -497,6 +581,7 @@ public sealed class MainWindow : Window
             return;
         }
 
+        _lastSafetyCheckAt = DateTimeOffset.Now;
         var decision = new BatterySafetyPolicy(_services.Options).Evaluate(_services.BatteryMonitor.GetBatteryInfo());
         if (decision.Action == SafetyAction.RestoreNormalSleep)
         {
@@ -526,6 +611,8 @@ public sealed class MainWindow : Window
 
     private void RenderStatus(VibestickStatus status)
     {
+        _lastStatus = status;
+        _lastRefreshAt = DateTimeOffset.Now;
         _modeText.Text = status.ActiveMode.ToString();
         _restoreText.Text = status.RestorePending ? "Yes" : "No";
         _lidText.Text = FormatPolicy(status.CurrentPolicy);
@@ -535,16 +622,8 @@ public sealed class MainWindow : Window
             ? "No whitelisted long-running tasks detected."
             : string.Join(", ", status.LongTasks.Select(static task => task.ProcessId.HasValue ? $"{task.Name} ({task.ProcessId})" : task.Name));
 
-        if (status.Warnings.Count > 0)
-        {
-            _diagnosticsList.Items.Clear();
-            foreach (var warning in status.Warnings)
-            {
-                _diagnosticsList.Items.Add($"WARN {warning}");
-            }
-        }
-
         SetGuardUi();
+        UpdateHyperWatch();
     }
 
     private async Task RunBusyAsync(Func<Task> action)
@@ -579,6 +658,129 @@ public sealed class MainWindow : Window
         var running = _sleepBlock is not null;
         _guardText.Text = running ? "Running" : "Stopped";
         _stopHyperButton.IsEnabled = running;
+        UpdateHyperWatch();
+    }
+
+    private void UpdateHyperWatch()
+    {
+        var status = _lastStatus;
+        if (status is null)
+        {
+            _protectionText.Text = "Refresh status to load protection state.";
+            _batterySafetyText.Text = "Battery safety check pending.";
+            _timingText.Text = "Guard stopped\nSafety check paused\nLast refresh: -";
+            _doctorSummaryText.Text = "Doctor not run yet.";
+            return;
+        }
+
+        var running = _sleepBlock is not null;
+        _protectionText.Text = string.Join(
+            Environment.NewLine,
+            running ? "OK Idle sleep is blocked" : "Guard is not blocking sleep",
+            $"Lid close: {FormatPolicy(status.CurrentPolicy)}",
+            status.RestorePending ? "Revert backup is saved" : "No restore is pending");
+
+        var batteryDecision = new BatterySafetyPolicy(_services.Options).Evaluate(status.Battery);
+        _batterySafetyText.Text = string.Join(
+            Environment.NewLine,
+            FormatBattery(status.Battery),
+            FormatSafetyDecision(batteryDecision, status.ActiveMode, running),
+            $"Warn <{_services.Options.BatteryWarnPercent}% / Down <{_services.Options.BatteryDowngradePercent}% / Restore <{_services.Options.BatteryRestorePercent}%");
+
+        _timingText.Text = BuildTimingText(running);
+        _doctorSummaryText.Text = BuildDoctorSummaryText(status);
+    }
+
+    private string BuildTimingText(bool running)
+    {
+        var lastRefresh = _lastRefreshAt?.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture) ?? "-";
+        if (!running)
+        {
+            return string.Join(
+                Environment.NewLine,
+                "Guard stopped",
+                "Safety check paused",
+                $"Last refresh: {lastRefresh}");
+        }
+
+        var now = DateTimeOffset.Now;
+        var runningFor = _guardStartedAt.HasValue
+            ? FormatWatchDuration(now - _guardStartedAt.Value)
+            : "-";
+        var nextCheck = _lastSafetyCheckAt.HasValue
+            ? FormatWatchDuration((_lastSafetyCheckAt.Value + _services.Options.HyperGuardInterval) - now)
+            : "soon";
+
+        return string.Join(
+            Environment.NewLine,
+            $"Guard running: {runningFor}",
+            $"Next safety check: {nextCheck}",
+            $"Last refresh: {lastRefresh}");
+    }
+
+    private string BuildDoctorSummaryText(VibestickStatus status)
+    {
+        if (status.Warnings.Count > 0)
+        {
+            return string.Join(
+                Environment.NewLine,
+                $"Warnings: {status.Warnings.Count}",
+                status.Warnings[0]);
+        }
+
+        if (_lastDoctorReport is null)
+        {
+            return "Doctor not run yet.\nRun Doctor for policy, battery, and task checks.";
+        }
+
+        var passed = _lastDoctorReport.Checks.Count(static check => check.Passed);
+        var failed = _lastDoctorReport.Checks.Count - passed;
+        return string.Join(
+            Environment.NewLine,
+            _lastDoctorReport.IsHealthy ? "Doctor passed" : "Doctor needs attention",
+            $"OK {passed} / ERR {failed}",
+            _lastDoctorReport.Checks.FirstOrDefault(static check => !check.Passed)?.Message ?? "No issues found.");
+    }
+
+    private static string FormatSafetyDecision(
+        BatterySafetyDecision decision,
+        VibestickMode activeMode,
+        bool isGuardRunning)
+    {
+        return decision.Action switch
+        {
+            SafetyAction.KeepHyper when activeMode == VibestickMode.Hyper || isGuardRunning => "Safe: HYPER can continue",
+            SafetyAction.KeepHyper => "Safe: no battery action needed",
+            SafetyAction.Warn => $"Warn: {decision.Message}",
+            SafetyAction.DowngradeToOn => $"Action: {decision.Message}",
+            SafetyAction.RestoreNormalSleep => $"Action: {decision.Message}",
+            _ => decision.Message
+        };
+    }
+
+    private static string FormatWatchDuration(TimeSpan duration)
+    {
+        if (duration < TimeSpan.Zero)
+        {
+            duration = TimeSpan.Zero;
+        }
+
+        var totalSeconds = Math.Max(0, (int)Math.Ceiling(duration.TotalSeconds));
+        if (totalSeconds < 60)
+        {
+            return $"{totalSeconds}s";
+        }
+
+        var totalMinutes = totalSeconds / 60;
+        var seconds = totalSeconds % 60;
+        if (totalMinutes < 60)
+        {
+            return $"{totalMinutes}m {seconds:00}s";
+        }
+
+        var hours = totalMinutes / 60;
+        var minutes = totalMinutes % 60;
+        return $"{hours}h {minutes:00}m";
     }
 
     private void WriteOutput<T>(string message, T value)
