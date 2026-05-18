@@ -694,6 +694,7 @@ internal static class Program
         {
             var reasoning = await WaitForPetSnapshotAsync(directory, "reasoning", TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
+            AssertDefaultPetScale(reasoning);
             AssertNearBottomRight(reasoning);
 
             await new CoderStatusWriter(directory)
@@ -998,6 +999,25 @@ internal static class Program
         if (rightGap > 320 || bottomGap > 320)
         {
             throw new InvalidOperationException($"Expected pet near bottom-right, got left={left}, top={top}, width={width}, height={height}.");
+        }
+    }
+
+    private static void AssertDefaultPetScale(JsonNode snapshot)
+    {
+        var width = snapshot["width"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing width.");
+        var height = snapshot["height"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing height.");
+        var scale = snapshot["scale"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing scale.");
+
+        AssertNear(248, width, 0.5, "pet width");
+        AssertNear(292, height, 0.5, "pet height");
+        AssertNear(1.0, scale, 0.001, "pet scale");
+    }
+
+    private static void AssertNear(double expected, double actual, double tolerance, string name)
+    {
+        if (Math.Abs(expected - actual) > tolerance)
+        {
+            throw new InvalidOperationException($"Expected {name} near {expected}, got {actual}.");
         }
     }
 

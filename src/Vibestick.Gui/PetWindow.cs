@@ -14,6 +14,7 @@ using Color = System.Windows.Media.Color;
 using ColorConverter = System.Windows.Media.ColorConverter;
 using HorizontalAlignment = System.Windows.HorizontalAlignment;
 using Image = System.Windows.Controls.Image;
+using InputCursors = System.Windows.Input.Cursors;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using Orientation = System.Windows.Controls.Orientation;
 using Point = System.Windows.Point;
@@ -26,7 +27,15 @@ namespace Vibestick.Gui;
 
 public sealed class PetWindow : Window
 {
+    private const double BaseWindowWidth = 248;
+    private const double BaseWindowHeight = 292;
+    private const double DefaultScale = 1.0;
+    private const double MinScale = 0.35;
+    private const double MaxScale = 1.5;
     private const double DefaultMargin = 16;
+    private const double ResizeDragDivisor = 220;
+    private const double ResizeHitPadding = 16;
+    private const double ResizeHitSpriteYRatio = 0.45;
 
     private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
     {
@@ -47,12 +56,22 @@ public sealed class PetWindow : Window
     private readonly TextBlock _titleText = new();
     private readonly TextBlock _messageText = new();
     private readonly StackPanel _badgesPanel = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+    private readonly ScaleTransform _rootScale = new(DefaultScale, DefaultScale);
+    private readonly Grid _spriteLayer = new()
+    {
+        Width = 184,
+        Height = 198,
+        HorizontalAlignment = HorizontalAlignment.Center
+    };
     private readonly PetSpriteAnimator _spriteAnimator;
     private PetState? _currentState;
     private bool _isRefreshing;
     private Point? _dragStart;
     private Point _windowStart;
     private bool _isDragging;
+    private PointerInteraction _pointerInteraction;
+    private double _scale = DefaultScale;
+    private double _resizeStartScale = DefaultScale;
 
     public PetWindow(
         GuiServices services,
@@ -68,8 +87,7 @@ public sealed class PetWindow : Window
         _placementStore = placementStore ?? new PetWindowStateStore();
 
         Title = "Vibestick Pet - Idle";
-        Width = 248;
-        Height = 292;
+        ApplyScale(DefaultScale);
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -101,21 +119,6 @@ public sealed class PetWindow : Window
         Content = BuildLayout(sprite, fallback);
         ContextMenu = BuildContextMenu();
 
-        Loaded += async (_, _) =>
-        {
-            ApplyInitialPlacement();
-            await RefreshNowAsync().ConfigureAwait(true);
-        };
-        Closing += (_, _) =>
-        {
-            _statusDebounceTimer.Stop();
-            _statusWatcher?.Dispose();
-            SavePlacement();
-        };
-        MouseLeftButtonDown += OnMouseLeftButtonDown;
-        MouseMove += OnMouseMove;
-        MouseLeftButtonUp += OnMouseLeftButtonUp;
-
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _statusTimer.Tick += async (_, _) => await RefreshNowAsync().ConfigureAwait(true);
         _statusTimer.Start();
@@ -131,6 +134,21 @@ public sealed class PetWindow : Window
         _frameTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(420) };
         _frameTimer.Tick += (_, _) => _spriteAnimator.AdvanceFrame();
         _frameTimer.Start();
+
+        Loaded += async (_, _) =>
+        {
+            ApplyInitialPlacement();
+            await RefreshNowAsync().ConfigureAwait(true);
+        };
+        Closing += (_, _) =>
+        {
+            _statusDebounceTimer.Stop();
+            _statusWatcher?.Dispose();
+            SavePlacement();
+        };
+        MouseLeftButtonDown += OnMouseLeftButtonDown;
+        MouseMove += OnMouseMove;
+        MouseLeftButtonUp += OnMouseLeftButtonUp;
     }
 
     public async Task RefreshNowAsync()
@@ -166,6 +184,9 @@ public sealed class PetWindow : Window
     {
         var root = new Grid
         {
+            Width = BaseWindowWidth,
+            Height = BaseWindowHeight,
+            LayoutTransform = _rootScale,
             Background = Brushes.Transparent,
             Margin = new Thickness(0)
         };
@@ -212,15 +233,9 @@ public sealed class PetWindow : Window
         _messageText.MaxHeight = 36;
         bubbleStack.Children.Add(_messageText);
 
-        var spriteLayer = new Grid
-        {
-            Width = 184,
-            Height = 198,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-        spriteLayer.Children.Add(sprite);
-        spriteLayer.Children.Add(fallback);
-        panel.Children.Add(spriteLayer);
+        _spriteLayer.Children.Add(sprite);
+        _spriteLayer.Children.Add(fallback);
+        panel.Children.Add(_spriteLayer);
 
         _badgesPanel.Margin = new Thickness(0, 4, 0, 8);
         panel.Children.Add(_badgesPanel);
@@ -338,31 +353,41 @@ public sealed class PetWindow : Window
         var saved = _placementStore.Load();
         if (saved is not null)
         {
+            ApplyScale(saved.Scale ?? DefaultScale);
             Left = Clamp(saved.Left, SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width);
             Top = Clamp(saved.Top, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height);
             return;
         }
 
+        ApplyScale(DefaultScale);
         Left = SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width - DefaultMargin;
         Top = SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height - DefaultMargin;
     }
 
     private void SavePlacement()
     {
-        _placementStore.Save(new PetWindowPlacement(Left, Top));
+        _placementStore.Save(new PetWindowPlacement(Left, Top, _scale));
     }
 
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
     {
         _dragStart = ToScreenDip(args.GetPosition(this));
         _windowStart = new Point(Left, Top);
+        _resizeStartScale = _scale;
+        _pointerInteraction = IsResizeHit(args) ? PointerInteraction.Resize : PointerInteraction.Move;
         _isDragging = false;
         CaptureMouse();
     }
 
     private void OnMouseMove(object sender, MouseEventArgs args)
     {
-        if (_dragStart is null || args.LeftButton != MouseButtonState.Pressed)
+        if (args.LeftButton != MouseButtonState.Pressed)
+        {
+            Cursor = IsResizeHit(args) ? InputCursors.SizeNWSE : InputCursors.Arrow;
+            return;
+        }
+
+        if (_dragStart is null)
         {
             return;
         }
@@ -375,6 +400,12 @@ public sealed class PetWindow : Window
         }
 
         _isDragging = true;
+        if (_pointerInteraction == PointerInteraction.Resize)
+        {
+            ResizeFromDrag(delta);
+            return;
+        }
+
         Left = _windowStart.X + delta.X;
         Top = _windowStart.Y + delta.Y;
     }
@@ -382,7 +413,7 @@ public sealed class PetWindow : Window
     private void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs args)
     {
         ReleaseMouseCapture();
-        if (_dragStart is not null && !_isDragging)
+        if (_dragStart is not null && !_isDragging && _pointerInteraction == PointerInteraction.Move)
         {
             HandlePrimaryClick();
         }
@@ -394,6 +425,7 @@ public sealed class PetWindow : Window
 
         _dragStart = null;
         _isDragging = false;
+        Cursor = IsResizeHit(args) ? InputCursors.SizeNWSE : InputCursors.Arrow;
     }
 
     private void HandlePrimaryClick()
@@ -412,6 +444,47 @@ public sealed class PetWindow : Window
         var screenPoint = PointToScreen(localPoint);
         var source = PresentationSource.FromVisual(this);
         return source?.CompositionTarget?.TransformFromDevice.Transform(screenPoint) ?? screenPoint;
+    }
+
+    private bool IsResizeHit(MouseEventArgs args)
+    {
+        if (_spriteLayer.ActualWidth <= 0 || _spriteLayer.ActualHeight <= 0)
+        {
+            return false;
+        }
+
+        var point = args.GetPosition(_spriteLayer);
+        return point.X >= -ResizeHitPadding &&
+            point.X <= _spriteLayer.ActualWidth + ResizeHitPadding &&
+            point.Y >= _spriteLayer.ActualHeight * ResizeHitSpriteYRatio;
+    }
+
+    private void ResizeFromDrag(Vector delta)
+    {
+        var dominantDelta = Math.Abs(delta.X) >= Math.Abs(delta.Y) ? delta.X : delta.Y;
+        ApplyScale(_resizeStartScale + dominantDelta / ResizeDragDivisor);
+        ClampToVirtualScreen();
+    }
+
+    private void ApplyScale(double scale)
+    {
+        _scale = Clamp(scale, MinScale, MaxScale);
+        _rootScale.ScaleX = _scale;
+        _rootScale.ScaleY = _scale;
+        Width = BaseWindowWidth * _scale;
+        Height = BaseWindowHeight * _scale;
+    }
+
+    private void ClampToVirtualScreen()
+    {
+        Left = Clamp(
+            Left,
+            SystemParameters.VirtualScreenLeft,
+            SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width);
+        Top = Clamp(
+            Top,
+            SystemParameters.VirtualScreenTop,
+            SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height);
     }
 
     private static double Clamp(double value, double minimum, double maximum)
@@ -449,6 +522,7 @@ public sealed class PetWindow : Window
                 Top,
                 Width,
                 Height,
+                Scale = _scale,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             };
             File.WriteAllText(
@@ -473,5 +547,11 @@ public sealed class PetWindow : Window
     {
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         internal static extern bool SetWindowText(IntPtr hWnd, string lpString);
+    }
+
+    private enum PointerInteraction
+    {
+        Move,
+        Resize
     }
 }
