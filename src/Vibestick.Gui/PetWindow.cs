@@ -113,6 +113,7 @@ public sealed class PetWindow : Window
     private PetSpriteCrawlDirection _walkDirection = PetSpriteCrawlDirection.Left;
     private DateTimeOffset? _lastWalkTickUtc;
     private DateTimeOffset? _walkPauseUntilUtc;
+    private DateTimeOffset _lastAnimationAdvanceUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastSnapshotWriteUtc = DateTimeOffset.MinValue;
     private TimeSpan _walkedSincePause = TimeSpan.Zero;
     private WalkBoundsSnapshot _lastWalkBoundsSnapshot = WalkBoundsSnapshot.Empty;
@@ -187,8 +188,12 @@ public sealed class PetWindow : Window
         };
 
         _frameTimer = new DispatcherTimer { Interval = MoodFrameInterval };
-        _frameTimer.Tick += (_, _) => _spriteAnimator.AdvanceFrame();
-        _frameTimer.Start();
+        _frameTimer.Tick += (_, _) =>
+        {
+            _spriteAnimator.AdvanceFrame();
+            SyncFrameTimerInterval();
+            WriteRuntimeSnapshotIfReady(DateTimeOffset.UtcNow);
+        };
 
         _walkTimer = new DispatcherTimer { Interval = WalkTickInterval };
         _walkTimer.Tick += (_, _) => UpdateAutoWalk();
@@ -954,7 +959,7 @@ public sealed class PetWindow : Window
         }
 
         _spriteAnimator.SetHovering(true);
-        _frameTimer.Interval = HoverFrameInterval;
+        SyncFrameTimerInterval();
     }
 
     private void StopSpriteHover()
@@ -962,7 +967,7 @@ public sealed class PetWindow : Window
         _spriteAnimator.SetHovering(false);
         if (!_isDragging && !IsAutoWalking)
         {
-            _frameTimer.Interval = MoodFrameInterval;
+            SyncFrameTimerInterval();
         }
     }
 
@@ -981,14 +986,14 @@ public sealed class PetWindow : Window
         _spriteAnimator.SetCrawlDirection(directionX < 0
             ? PetSpriteCrawlDirection.Left
             : PetSpriteCrawlDirection.Right);
-        _frameTimer.Interval = CrawlFrameInterval;
+        SyncFrameTimerInterval();
     }
 
     private void StopCrawling()
     {
         _spriteAnimator.SetCrawlDirection(null);
         _spriteAnimator.SetHovering(false);
-        _frameTimer.Interval = IsAutoWalking ? CrawlFrameInterval : MoodFrameInterval;
+        SyncFrameTimerInterval();
     }
 
     private bool IsAutoWalking =>
@@ -1005,6 +1010,9 @@ public sealed class PetWindow : Window
             return;
         }
 
+        var now = DateTimeOffset.UtcNow;
+        AdvanceSpriteAnimationIfDue(now);
+
         if (!_walkingEnabled || _walkTemporarilyPaused || _isDragging)
         {
             _lastWalkTickUtc = null;
@@ -1012,7 +1020,6 @@ public sealed class PetWindow : Window
             return;
         }
 
-        var now = DateTimeOffset.UtcNow;
         if (_walkPauseUntilUtc is not null && _walkPauseUntilUtc > now)
         {
             _lastWalkTickUtc = now;
@@ -1139,15 +1146,20 @@ public sealed class PetWindow : Window
         {
             _spriteAnimator.SetHovering(false);
             _spriteAnimator.SetCrawlDirection(_walkDirection);
-            _frameTimer.Interval = CrawlFrameInterval;
+            SyncFrameTimerInterval();
             return;
         }
 
         if (!_isDragging)
         {
             _spriteAnimator.SetCrawlDirection(null);
-            _frameTimer.Interval = MoodFrameInterval;
+            SyncFrameTimerInterval();
         }
+    }
+
+    private void SyncFrameTimerInterval()
+    {
+        _frameTimer.Interval = _spriteAnimator.CurrentFrameInterval;
     }
 
     private void AlignToWalkLane()
@@ -1221,6 +1233,20 @@ public sealed class PetWindow : Window
         }
 
         WriteRuntimeSnapshot(_currentState);
+    }
+
+    private void AdvanceSpriteAnimationIfDue(DateTimeOffset now)
+    {
+        if (_lastAnimationAdvanceUtc != DateTimeOffset.MinValue &&
+            now - _lastAnimationAdvanceUtc < _spriteAnimator.CurrentFrameInterval)
+        {
+            return;
+        }
+
+        _spriteAnimator.AdvanceFrame();
+        SyncFrameTimerInterval();
+        _lastAnimationAdvanceUtc = now;
+        WriteRuntimeSnapshotIfReady(now);
     }
 
     private void HandlePrimaryClick()

@@ -19,25 +19,41 @@ public sealed record PetSpriteFrameSnapshot(
     int Row,
     int FrameIndex,
     string? Direction,
+    string ClipName = "seated_blink",
+    string FrameKey = "r0c0",
+    int CatalogFrameCount = 57,
     double MotionOffsetX = 0,
-    double MotionOffsetY = 0);
+    double MotionOffsetY = 0)
+{
+    public IReadOnlyList<string> CatalogFrameKeys { get; init; } = Array.Empty<string>();
+}
 
 public sealed class PetSpriteAnimator
 {
     private const int FrameWidth = 192;
     private const int FrameHeight = 208;
-    private const int MoodFrameCount = 2;
-    private const int CrawlFrameCount = 4;
-    private const int HoverFrameCount = 2;
+    private const int CatalogFrameTotal = 57;
+    private static readonly TimeSpan DefaultRandomDelay = TimeSpan.FromSeconds(6);
+    private static readonly IReadOnlyDictionary<string, PetAnimationClip> Clips = BuildClips();
+    private static readonly IReadOnlyList<string> CatalogFrameKeys = Clips.Values
+        .SelectMany(static clip => clip.Frames.Select(static frame => frame.Key))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(static key => key, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
     private readonly Image _image;
     private readonly TextBlock _fallback;
     private readonly BitmapSource? _sheet;
     private readonly ScaleTransform _directionTransform = new(1, 1);
     private readonly TranslateTransform _motionTransform = new();
+    private readonly Random _random = CreateRandom();
+    private readonly bool _useSeededFastSchedule = Environment.GetEnvironmentVariable("VIBESTICK_PET_ANIMATION_SEED") is not null;
     private PetMood _mood = PetMood.Idle;
     private PetSpriteCrawlDirection? _crawlDirection;
     private bool _isHovering;
+    private PetAnimationClip _activeClip;
+    private PetAnimationClip? _randomActionClip;
+    private DateTimeOffset _nextRandomActionAtUtc;
     private int _frameIndex;
 
     public PetSpriteAnimator(Image image, TextBlock fallback)
@@ -45,6 +61,9 @@ public sealed class PetSpriteAnimator
         _image = image;
         _fallback = fallback;
         _sheet = LoadSheet();
+        _activeClip = Clip("seated_blink");
+        _nextRandomActionAtUtc = DateTimeOffset.UtcNow +
+            (_useSeededFastSchedule ? TimeSpan.FromMilliseconds(900) : DefaultRandomDelay);
         var transformGroup = new TransformGroup();
         transformGroup.Children.Add(_directionTransform);
         transformGroup.Children.Add(_motionTransform);
@@ -55,7 +74,11 @@ public sealed class PetSpriteAnimator
         Render();
     }
 
-    public PetSpriteFrameSnapshot CurrentFrame { get; private set; } = new("seated", 1, 4, 0, null);
+    public PetSpriteFrameSnapshot CurrentFrame { get; private set; } = new("seated", 0, 0, 0, null);
+
+    public TimeSpan CurrentFrameInterval => _activeClip.FrameInterval;
+
+    public int CatalogFrameCount => CatalogFrameTotal;
 
     public void SetMood(PetMood mood)
     {
@@ -65,7 +88,9 @@ public sealed class PetSpriteAnimator
         }
 
         _mood = mood;
-        _frameIndex = 0;
+        _randomActionClip = null;
+        ScheduleNextRandomAction(DateTimeOffset.UtcNow);
+        SelectActiveClip(forceReset: true);
         Render();
     }
 
@@ -77,7 +102,12 @@ public sealed class PetSpriteAnimator
         }
 
         _crawlDirection = direction;
-        _frameIndex = 0;
+        if (direction is not null)
+        {
+            _randomActionClip = null;
+        }
+
+        SelectActiveClip(forceReset: true);
         Render();
     }
 
@@ -89,77 +119,170 @@ public sealed class PetSpriteAnimator
         }
 
         _isHovering = isHovering;
-        if (_crawlDirection is null)
+        if (isHovering)
         {
-            _frameIndex = 0;
-            Render();
+            _randomActionClip = null;
         }
+
+        SelectActiveClip(forceReset: true);
+        Render();
     }
 
     public void AdvanceFrame()
     {
-        _frameIndex = (_frameIndex + 1) % GetActiveFrameCount();
+        var now = DateTimeOffset.UtcNow;
+        var clipChanged = SelectActiveClip(forceReset: false, now: now);
+
+        if (!clipChanged && !_activeClip.Loops && _frameIndex >= _activeClip.Frames.Count - 1)
+        {
+            _randomActionClip = null;
+            ScheduleNextRandomAction(now);
+            SelectActiveClip(forceReset: true, now: now);
+        }
+        else if (!clipChanged)
+        {
+            _frameIndex = (_frameIndex + 1) % _activeClip.Frames.Count;
+        }
+
         Render();
+    }
+
+    private bool SelectActiveClip(bool forceReset, DateTimeOffset? now = null)
+    {
+        var selected = ResolveClip(now ?? DateTimeOffset.UtcNow);
+        if (forceReset || !ReferenceEquals(selected, _activeClip))
+        {
+            _activeClip = selected;
+            _frameIndex = 0;
+            return true;
+        }
+
+        return false;
+    }
+
+    private PetAnimationClip ResolveClip(DateTimeOffset now)
+    {
+        if (_crawlDirection is not null)
+        {
+            return Clip("patrol_crawl");
+        }
+
+        if (_isHovering)
+        {
+            return Clip("attention_paw");
+        }
+
+        if (IsUrgentMood(_mood))
+        {
+            _randomActionClip = null;
+            return Clip("attention_paw");
+        }
+
+        if (_mood == PetMood.Sleeping)
+        {
+            _randomActionClip = null;
+            return Clip("sleepy_nap");
+        }
+
+        if (_randomActionClip is not null)
+        {
+            return _randomActionClip;
+        }
+
+        if (CanUseRandomActions(_mood) && now >= _nextRandomActionAtUtc)
+        {
+            _randomActionClip = ChooseRandomAction(_mood);
+            return _randomActionClip;
+        }
+
+        return BaseMoodClip(_mood);
     }
 
     private void Render()
     {
-        var frame = GetActiveFrame();
-        CurrentFrame = frame;
-        _fallback.Text = frame.Pose;
+        var frame = _activeClip.Frames[_frameIndex % _activeClip.Frames.Count];
+        var direction = _crawlDirection?.ToString();
+        CurrentFrame = new PetSpriteFrameSnapshot(
+                _activeClip.Pose,
+                frame.Column,
+                frame.Row,
+                _frameIndex,
+                direction,
+                _activeClip.Name,
+                frame.Key,
+                CatalogFrameTotal,
+                frame.MotionOffsetX,
+                frame.MotionOffsetY)
+            { CatalogFrameKeys = CatalogFrameKeys };
+        _fallback.Text = $"{_activeClip.Name}:{frame.Key}";
         if (_sheet is null)
         {
             return;
         }
 
-        var (column, row) = (frame.Column, frame.Row);
-        _directionTransform.ScaleX = _crawlDirection == PetSpriteCrawlDirection.Left ? -1 : 1;
+        _directionTransform.ScaleX = _activeClip.FlipsWithDirection && _crawlDirection == PetSpriteCrawlDirection.Left ? -1 : 1;
         _motionTransform.X = frame.MotionOffsetX;
         _motionTransform.Y = frame.MotionOffsetY;
         _image.Source = new CroppedBitmap(
             _sheet,
             new System.Windows.Int32Rect(
-                column * FrameWidth,
-                row * FrameHeight,
+                frame.Column * FrameWidth,
+                frame.Row * FrameHeight,
                 FrameWidth,
                 FrameHeight));
     }
 
-    private int GetActiveFrameCount()
+    private PetAnimationClip ChooseRandomAction(PetMood mood)
     {
-        if (_crawlDirection is not null)
-        {
-            return CrawlFrameCount;
-        }
-
-        return _isHovering ? HoverFrameCount : MoodFrameCount;
+        var pool = mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling
+            ? new[] { "curious_look", "attention_paw", "playful_stretch", "groom_think" }
+            : new[] { "curious_look", "attention_paw", "playful_stretch", "sleepy_nap", "happy_beg", "groom_think" };
+        return Clip(pool[_random.Next(pool.Length)]);
     }
 
-    private PetSpriteFrameSnapshot GetActiveFrame()
+    private void ScheduleNextRandomAction(DateTimeOffset now)
     {
-        if (_crawlDirection is not null)
+        if (!CanUseRandomActions(_mood))
         {
-            var (column, row) = GetCrawlFrame(_frameIndex);
-            var (offsetX, offsetY) = GetCrawlMotion(_frameIndex, _crawlDirection.Value);
-            return new PetSpriteFrameSnapshot(
-                "crawling",
-                column,
-                row,
-                _frameIndex,
-                _crawlDirection.ToString(),
-                offsetX,
-                offsetY);
+            _nextRandomActionAtUtc = DateTimeOffset.MaxValue;
+            return;
         }
 
-        if (_isHovering)
+        if (_useSeededFastSchedule)
         {
-            var (column, row) = GetHoverFrame(_frameIndex);
-            return new PetSpriteFrameSnapshot("hover-bob", column, row, _frameIndex, null);
+            _nextRandomActionAtUtc = now + TimeSpan.FromMilliseconds(900);
+            return;
         }
 
-        var moodPose = _mood == PetMood.Running ? "standing" : "seated";
-        var (moodColumn, moodRow) = GetMoodFrame(_mood, _frameIndex);
-        return new PetSpriteFrameSnapshot(moodPose, moodColumn, moodRow, _frameIndex, null);
+        var minSeconds = _mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling ? 8 : 6;
+        var rangeSeconds = _mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling ? 10 : 8;
+        _nextRandomActionAtUtc = now + TimeSpan.FromSeconds(minSeconds + _random.NextDouble() * rangeSeconds);
+    }
+
+    private static bool CanUseRandomActions(PetMood mood)
+    {
+        return mood is PetMood.Idle or
+            PetMood.Success or
+            PetMood.Offline or
+            PetMood.Running or
+            PetMood.Reasoning or
+            PetMood.ToolCalling;
+    }
+
+    private static bool IsUrgentMood(PetMood mood)
+    {
+        return mood is PetMood.Error or PetMood.WaitingAuthorization or PetMood.PowerWarning;
+    }
+
+    private static PetAnimationClip BaseMoodClip(PetMood mood)
+    {
+        return mood switch
+        {
+            PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling => Clip("curious_look"),
+            PetMood.Sleeping => Clip("sleepy_nap"),
+            PetMood.Error or PetMood.WaitingAuthorization or PetMood.PowerWarning => Clip("attention_paw"),
+            _ => Clip("seated_blink")
+        };
     }
 
     private static BitmapSource? LoadSheet()
@@ -179,37 +302,82 @@ public sealed class PetSpriteAnimator
         return bitmap;
     }
 
-    private static (int Column, int Row) GetCrawlFrame(int frameIndex)
+    private static Random CreateRandom()
     {
-        return (frameIndex % CrawlFrameCount, 1);
+        var seedText = Environment.GetEnvironmentVariable("VIBESTICK_PET_ANIMATION_SEED");
+        return int.TryParse(seedText, out var seed) ? new Random(seed) : new Random();
     }
 
-    private static (double OffsetX, double OffsetY) GetCrawlMotion(int frameIndex, PetSpriteCrawlDirection direction)
+    private static IReadOnlyDictionary<string, PetAnimationClip> BuildClips()
     {
-        var signedStride = direction == PetSpriteCrawlDirection.Right ? 1 : -1;
-        return (frameIndex % CrawlFrameCount) switch
+        var clips = new[]
         {
-            0 => (-2 * signedStride, 1),
-            1 => (2 * signedStride, -7),
-            2 => (5 * signedStride, -3),
-            _ => (1 * signedStride, 2)
+            new PetAnimationClip("seated_blink", "seated", Row(0, 0, 5), TimeSpan.FromMilliseconds(360), Loops: true, FlipsWithDirection: false),
+            new PetAnimationClip("patrol_crawl", "crawling", PatrolFrames(), TimeSpan.FromMilliseconds(115), Loops: true, FlipsWithDirection: true),
+            new PetAnimationClip("attention_paw", "attention", Row(3, 0, 3), TimeSpan.FromMilliseconds(210), Loops: false, FlipsWithDirection: false),
+            new PetAnimationClip("playful_stretch", "stretch", Row(4, 0, 4), TimeSpan.FromMilliseconds(240), Loops: false, FlipsWithDirection: false),
+            new PetAnimationClip("sleepy_nap", "sleepy", Row(5, 0, 7), TimeSpan.FromMilliseconds(300), Loops: false, FlipsWithDirection: false),
+            new PetAnimationClip("curious_look", "curious", Row(6, 0, 5), TimeSpan.FromMilliseconds(260), Loops: true, FlipsWithDirection: false),
+            new PetAnimationClip("happy_beg", "happy", Row(7, 0, 5), TimeSpan.FromMilliseconds(250), Loops: false, FlipsWithDirection: false),
+            new PetAnimationClip("groom_think", "grooming", Row(8, 0, 5), TimeSpan.FromMilliseconds(260), Loops: false, FlipsWithDirection: false)
+        };
+
+        return clips.ToDictionary(static clip => clip.Name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static PetAnimationClip Clip(string name)
+    {
+        return Clips[name];
+    }
+
+    private static IReadOnlyList<PetSpriteFrameRef> Row(int row, int firstColumn, int lastColumn)
+    {
+        return Enumerable.Range(firstColumn, lastColumn - firstColumn + 1)
+            .Select(column => new PetSpriteFrameRef(column, row))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<PetSpriteFrameRef> PatrolFrames()
+    {
+        return Row(1, 0, 7)
+            .Concat(Row(2, 0, 7))
+            .Select((frame, index) =>
+            {
+                var (offsetX, offsetY) = GetPatrolMotion(index);
+                return frame with { MotionOffsetX = offsetX, MotionOffsetY = offsetY };
+            })
+            .ToArray();
+    }
+
+    private static (double OffsetX, double OffsetY) GetPatrolMotion(int frameIndex)
+    {
+        return (frameIndex % 8) switch
+        {
+            0 => (-3, 1),
+            1 => (-1, -4),
+            2 => (2, -7),
+            3 => (4, -4),
+            4 => (5, 1),
+            5 => (3, -3),
+            6 => (0, -6),
+            _ => (-2, -2)
         };
     }
 
-    private static (int Column, int Row) GetHoverFrame(int frameIndex)
+    private sealed record PetSpriteFrameRef(
+        int Column,
+        int Row,
+        double MotionOffsetX = 0,
+        double MotionOffsetY = 0)
     {
-        return frameIndex % HoverFrameCount == 0
-            ? (1, 4)
-            : (0, 1);
+        public string Key => $"r{Row}c{Column}";
     }
 
-    private static (int Column, int Row) GetMoodFrame(PetMood mood, int frameIndex)
-    {
-        if (mood == PetMood.Running)
-        {
-            return (frameIndex % MoodFrameCount, 2);
-        }
-
-        return (1 + frameIndex % MoodFrameCount, 4);
-    }
+    private sealed record PetAnimationClip(
+        string Name,
+        string Pose,
+        IReadOnlyList<PetSpriteFrameRef> Frames,
+        TimeSpan FrameInterval,
+        bool Loops,
+        bool FlipsWithDirection);
 }

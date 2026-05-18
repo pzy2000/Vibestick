@@ -43,6 +43,7 @@ internal static class Program
             ("Desktop pet e2e reflects state and bottom walking lane", TestDesktopPetE2EAsync),
             ("Desktop pet walks along bottom lane", TestDesktopPetWalksAlongBottomLaneAsync),
             ("Desktop pet can start with walking paused", TestDesktopPetWalkingPausedE2EAsync),
+            ("Desktop pet reports full sprite catalog and seeded random actions", TestDesktopPetSpriteCatalogAndRandomActionsE2EAsync),
             ("Desktop pet e2e renders collapsed multi-session cards", TestDesktopPetMultiSessionE2EAsync)
         };
 
@@ -957,18 +958,86 @@ internal static class Program
             var first = await WaitForWalkingSnapshotAsync(directory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
             var firstLeft = first["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
             AssertWithinBottomWalkLane(first);
-            AssertSpritePose(first, "crawling", expectedRow: 1);
+            AssertSpriteClip(first, "patrol_crawl");
+            AssertSpritePoseInRows(first, "crawling", new[] { 1, 2 });
+            AssertEqual(57, first["sprite"]?["catalogFrameCount"]?.GetValue<int>());
 
             var animated = await WaitForWalkingMotionSnapshotAsync(directory, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-            AssertSpritePose(animated, "crawling", expectedRow: 1);
+            AssertSpriteClip(animated, "patrol_crawl");
+            AssertSpritePoseInRows(animated, "crawling", new[] { 1, 2 });
             AssertCrawlVisualMotion(animated);
 
             var second = await WaitForPetLeftChangeAsync(directory, firstLeft, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             AssertWithinBottomWalkLane(second);
-            AssertSpritePose(second, "crawling", expectedRow: 1);
+            AssertSpriteClip(second, "patrol_crawl");
+            AssertSpritePoseInRows(second, "crawling", new[] { 1, 2 });
             var direction = second["walking"]?["direction"]?.GetValue<string>() ??
                 throw new InvalidOperationException("Snapshot missing walking direction.");
             AssertTrue(direction is "Left" or "Right");
+
+            var rowTwo = await WaitForSpriteRowAsync(directory, "patrol_crawl", 2, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            AssertSpritePoseInRows(rowTwo, "crawling", new[] { 2 });
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task TestDesktopPetSpriteCatalogAndRandomActionsE2EAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-e2e-sprites-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var placementPath = Path.Combine(directory, "pet-window.json");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+                placementPath,
+                """
+                {
+                  "Left": 120,
+                  "Top": 120,
+                  "Scale": 1.0,
+                  "WalkingEnabled": false
+                }
+                """)
+            .ConfigureAwait(false);
+        await new CoderStatusWriter(directory)
+            .EmitAsync("codex", CoderAgentPhase.Idle, "idle", ttlSeconds: 60)
+            .ConfigureAwait(false);
+
+        var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = $"\"{guiDll}\" --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.EnvironmentVariables["VIBESTICK_PET_ANIMATION_SEED"] = "11";
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start Vibestick GUI.");
+
+        try
+        {
+            var initial = await WaitForPetSnapshotAnyAsync(directory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            AssertSpriteCatalog(initial);
+            AssertSpriteClip(initial, "seated_blink");
+
+            var randomAction = await WaitForSpriteClipNotAsync(directory, "seated_blink", TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+            AssertSpriteCatalog(randomAction);
+            AssertTrue(randomAction["sprite"]?["clipName"]?.GetValue<string>() is
+                "curious_look" or "attention_paw" or "playful_stretch" or "sleepy_nap" or "happy_beg" or "groom_think");
+
+            var returned = await WaitForSpriteClipAsync(directory, "seated_blink", TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+            AssertSpriteCatalog(returned);
         }
         finally
         {
@@ -1522,6 +1591,96 @@ internal static class Program
         throw new TimeoutException($"Pet crawl motion offsets did not animate within {timeout.TotalSeconds} seconds.");
     }
 
+    private static async Task<JsonNode> WaitForSpriteRowAsync(
+        string statusDirectory,
+        string clipName,
+        int row,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    var sprite = node?["sprite"];
+                    if (string.Equals(sprite?["clipName"]?.GetValue<string>(), clipName, StringComparison.OrdinalIgnoreCase) &&
+                        sprite?["row"]?.GetValue<int>() == row)
+                    {
+                        return node!;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException($"Pet sprite clip '{clipName}' did not reach row {row} within {timeout.TotalSeconds} seconds.");
+    }
+
+    private static Task<JsonNode> WaitForSpriteClipAsync(
+        string statusDirectory,
+        string clipName,
+        TimeSpan timeout)
+    {
+        return WaitForSpriteClipMatchAsync(
+            statusDirectory,
+            sprite => sprite?["clipName"] is not null &&
+                string.Equals(sprite["clipName"]?.GetValue<string>(), clipName, StringComparison.OrdinalIgnoreCase),
+            $"Pet sprite did not reach clip '{clipName}' within {timeout.TotalSeconds} seconds.",
+            timeout);
+    }
+
+    private static Task<JsonNode> WaitForSpriteClipNotAsync(
+        string statusDirectory,
+        string clipName,
+        TimeSpan timeout)
+    {
+        return WaitForSpriteClipMatchAsync(
+            statusDirectory,
+            sprite => sprite?["clipName"] is not null &&
+                !string.Equals(sprite["clipName"]?.GetValue<string>(), clipName, StringComparison.OrdinalIgnoreCase),
+            $"Pet sprite did not leave clip '{clipName}' within {timeout.TotalSeconds} seconds.",
+            timeout);
+    }
+
+    private static async Task<JsonNode> WaitForSpriteClipMatchAsync(
+        string statusDirectory,
+        Func<JsonNode?, bool> predicate,
+        string timeoutMessage,
+        TimeSpan timeout)
+    {
+        var path = Path.Combine(statusDirectory, "pet-runtime-state.snapshot");
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var node = JsonNode.Parse(await File.ReadAllTextAsync(path).ConfigureAwait(false));
+                    if (predicate(node?["sprite"]))
+                    {
+                        return node!;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+                {
+                }
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException(timeoutMessage);
+    }
+
     private static void AssertPanelActionVisible(JsonArray buttons, string text)
     {
         var button = buttons.FirstOrDefault(node => node?["Text"]?.GetValue<string>() == text) ??
@@ -1585,6 +1744,50 @@ internal static class Program
         var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
         AssertEqual(expectedPose, sprite["pose"]?.GetValue<string>());
         AssertEqual(expectedRow, sprite["row"]?.GetValue<int>());
+    }
+
+    private static void AssertSpritePoseInRows(JsonNode snapshot, string expectedPose, IReadOnlyList<int> expectedRows)
+    {
+        var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
+        AssertEqual(expectedPose, sprite["pose"]?.GetValue<string>());
+        var row = sprite["row"]?.GetValue<int>() ?? throw new InvalidOperationException("Snapshot missing sprite row.");
+        if (!expectedRows.Contains(row))
+        {
+            throw new InvalidOperationException($"Expected sprite row in [{string.Join(", ", expectedRows)}], got {row}.");
+        }
+    }
+
+    private static void AssertSpriteClip(JsonNode snapshot, string expectedClipName)
+    {
+        var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
+        AssertEqual(expectedClipName, sprite["clipName"]?.GetValue<string>());
+    }
+
+    private static void AssertSpriteCatalog(JsonNode snapshot)
+    {
+        var sprite = snapshot["sprite"] ?? throw new InvalidOperationException("Snapshot missing sprite.");
+        AssertEqual(57, sprite["catalogFrameCount"]?.GetValue<int>());
+        var keys = sprite["catalogFrameKeys"]?.AsArray()
+            .Select(static node => node?.GetValue<string>() ?? string.Empty)
+            .Where(static key => !string.IsNullOrWhiteSpace(key))
+            .ToArray() ?? throw new InvalidOperationException("Snapshot missing sprite catalog frame keys.");
+        AssertSequence(ExpectedPetSpriteFrameKeys(), keys);
+    }
+
+    private static IReadOnlyList<string> ExpectedPetSpriteFrameKeys()
+    {
+        return new[]
+        {
+            "r0c0", "r0c1", "r0c2", "r0c3", "r0c4", "r0c5",
+            "r1c0", "r1c1", "r1c2", "r1c3", "r1c4", "r1c5", "r1c6", "r1c7",
+            "r2c0", "r2c1", "r2c2", "r2c3", "r2c4", "r2c5", "r2c6", "r2c7",
+            "r3c0", "r3c1", "r3c2", "r3c3",
+            "r4c0", "r4c1", "r4c2", "r4c3", "r4c4",
+            "r5c0", "r5c1", "r5c2", "r5c3", "r5c4", "r5c5", "r5c6", "r5c7",
+            "r6c0", "r6c1", "r6c2", "r6c3", "r6c4", "r6c5",
+            "r7c0", "r7c1", "r7c2", "r7c3", "r7c4", "r7c5",
+            "r8c0", "r8c1", "r8c2", "r8c3", "r8c4", "r8c5"
+        };
     }
 
     private static void AssertCrawlVisualMotion(JsonNode snapshot)
