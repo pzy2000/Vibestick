@@ -30,6 +30,7 @@ public sealed class App : Application
     private PetWindow? _petWindow;
     private MainWindow? _mainWindow;
     private Forms.NotifyIcon? _notifyIcon;
+    private Forms.ToolStripMenuItem? _petToggleTrayMenuItem;
     private string? _placementPath;
     private string? _panelLayoutSnapshotPath;
 
@@ -103,6 +104,7 @@ public sealed class App : Application
         if (_petWindow is { IsVisible: true })
         {
             _petWindow.Activate();
+            UpdateTrayPetToggleText();
             return;
         }
 
@@ -110,9 +112,40 @@ public sealed class App : Application
             _services,
             _runtimeState,
             ShowControlPanel,
+            HidePet,
             () => Shutdown(0),
             new PetWindowStateStore(_placementPath));
+        _petWindow.Closed += (_, _) =>
+        {
+            _petWindow = null;
+            UpdateTrayPetToggleText();
+        };
         _petWindow.Show();
+        UpdateTrayPetToggleText();
+    }
+
+    private void HidePet()
+    {
+        var petWindow = _petWindow;
+        if (petWindow is null)
+        {
+            return;
+        }
+
+        _petWindow = null;
+        petWindow.Close();
+        UpdateTrayPetToggleText();
+    }
+
+    private void TogglePet()
+    {
+        if (_petWindow is { IsVisible: true })
+        {
+            HidePet();
+            return;
+        }
+
+        ShowPet();
     }
 
     private void ShowControlPanel()
@@ -144,9 +177,21 @@ public sealed class App : Application
         };
 
         _notifyIcon.ContextMenuStrip.Items.Add("Open Control Panel", null, (_, _) => Dispatcher.Invoke(ShowControlPanel));
-        _notifyIcon.ContextMenuStrip.Items.Add("Show Pet", null, (_, _) => Dispatcher.Invoke(ShowPet));
+        _petToggleTrayMenuItem = new Forms.ToolStripMenuItem("Hide Pet", null, (_, _) => Dispatcher.Invoke(TogglePet));
+        _notifyIcon.ContextMenuStrip.Items.Add(_petToggleTrayMenuItem);
+        UpdateTrayPetToggleText();
         _notifyIcon.ContextMenuStrip.Items.Add("Exit Vibestick", null, (_, _) => Dispatcher.Invoke(() => Shutdown(0)));
         _notifyIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowControlPanel);
+    }
+
+    private void UpdateTrayPetToggleText()
+    {
+        if (_petToggleTrayMenuItem is null)
+        {
+            return;
+        }
+
+        _petToggleTrayMenuItem.Text = _petWindow is { IsVisible: true } ? "Hide Pet" : "Show Pet";
     }
 
     private static bool HasFlag(string[] args, string flag)

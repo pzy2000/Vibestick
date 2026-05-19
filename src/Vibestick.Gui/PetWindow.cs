@@ -67,6 +67,7 @@ public sealed class PetWindow : Window
     private readonly GuiRuntimeState _runtimeState;
     private readonly PetWindowStateStore _placementStore;
     private readonly Action _openControlPanel;
+    private readonly Action _hidePet;
     private readonly Action _exitApplication;
     private readonly DispatcherTimer _statusTimer;
     private readonly DispatcherTimer _statusDebounceTimer;
@@ -123,12 +124,14 @@ public sealed class PetWindow : Window
         GuiServices services,
         GuiRuntimeState runtimeState,
         Action openControlPanel,
+        Action hidePet,
         Action exitApplication,
         PetWindowStateStore? placementStore = null)
     {
         _services = services;
         _runtimeState = runtimeState;
         _openControlPanel = openControlPanel;
+        _hidePet = hidePet;
         _exitApplication = exitApplication;
         _placementStore = placementStore ?? new PetWindowStateStore();
 
@@ -224,6 +227,7 @@ public sealed class PetWindow : Window
         MouseLeftButtonDown += OnMouseLeftButtonDown;
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnMouseLeftButtonUp;
+        PreviewMouseRightButtonUp += OnPreviewMouseRightButtonUp;
         _spriteLayer.MouseEnter += (_, _) => StartSpriteHover();
         _spriteLayer.MouseLeave += (_, _) => StopSpriteHover();
     }
@@ -372,6 +376,10 @@ public sealed class PetWindow : Window
         _walkingToggleMenuItem.Click += (_, _) => ToggleWalking();
         UpdateWalkingMenuText();
         menu.Items.Add(_walkingToggleMenuItem);
+
+        var hide = new MenuItem { Header = "Hide Pet" };
+        hide.Click += (_, _) => _hidePet();
+        menu.Items.Add(hide);
 
         menu.Items.Add(new Separator());
         var exit = new MenuItem { Header = "Exit Vibestick" };
@@ -886,6 +894,19 @@ public sealed class PetWindow : Window
         _pointerInteraction = IsResizeHit(args) ? PointerInteraction.Resize : PointerInteraction.Move;
         _isDragging = false;
         CaptureMouse();
+    }
+
+    private void OnPreviewMouseRightButtonUp(object sender, MouseButtonEventArgs args)
+    {
+        args.Handled = true;
+        if (ContextMenu is null)
+        {
+            return;
+        }
+
+        ContextMenu.PlacementTarget = this;
+        ContextMenu.Placement = PlacementMode.MousePoint;
+        ContextMenu.IsOpen = true;
     }
 
     private void OnMouseMove(object sender, MouseEventArgs args)

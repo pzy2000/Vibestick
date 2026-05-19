@@ -26,10 +26,25 @@ if [[ -z "$resource_bundle" ]]; then
   echo "SwiftPM resource bundle for VibestickApp was not found." >&2
   exit 2
 fi
-cp -R "$resource_bundle" "$app/Contents/Resources/"
+ditto --norsrc "$resource_bundle" "$app/Contents/Resources/$(basename "$resource_bundle")"
+
+clear_app_xattrs() {
+  if command -v xattr >/dev/null 2>&1; then
+    for _ in 1 2 3; do
+      xattr -cr "$app"
+      if ! xattr -lr "$app" 2>/dev/null | grep -q "com.apple.FinderInfo"; then
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+}
+
+clear_app_xattrs
 
 if [[ "$mode" == "dev" ]]; then
   codesign --force --deep --sign - "$app"
+  clear_app_xattrs
   codesign --force --sign - "$dist/vibestickctl"
   echo "Built development bundle at $app"
   exit 0
@@ -40,6 +55,7 @@ fi
 : "${NOTARY_PROFILE:?Set NOTARY_PROFILE for xcrun notarytool.}"
 
 codesign --force --options runtime --timestamp --deep --sign "$DEVELOPER_ID_APPLICATION" "$app"
+clear_app_xattrs
 codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$dist/vibestickctl"
 
 pkg="$dist/Vibestick.pkg"

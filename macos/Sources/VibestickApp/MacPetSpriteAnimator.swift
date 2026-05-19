@@ -1,7 +1,7 @@
 import AppKit
-import SwiftUI
+import QuartzCore
 
-enum MacPetCrawlDirection {
+enum MacPetCrawlDirection: Equatable {
     case left
     case right
 }
@@ -17,26 +17,20 @@ struct MacPetSpriteFrameSnapshot: Equatable {
     let flipsWithDirection: Bool
 }
 
+struct MacPetSpritePresentation {
+    let frame: MacPetSpriteFrameSnapshot
+    let contentsRect: CGRect
+    let horizontalScale: CGFloat
+}
+
 @MainActor
-final class MacPetSpriteAnimator: ObservableObject {
+final class MacPetSpriteAnimator {
     private static let frameWidth = 192
     private static let frameHeight = 208
     private static let sheetWidth = 1536
     private static let sheetHeight = 1872
     private static let clips = buildClips()
 
-    @Published private(set) var image: NSImage?
-    @Published private(set) var frame = MacPetSpriteFrameSnapshot(
-        pose: "seated",
-        column: 0,
-        row: 0,
-        frameIndex: 0,
-        clipName: "seated_blink",
-        motionOffsetX: 0,
-        motionOffsetY: 0,
-        flipsWithDirection: false)
-
-    private let sheet: NSImage?
     private var mood = "idle"
     private var crawlDirection: MacPetCrawlDirection?
     private var isHovering = false
@@ -44,70 +38,88 @@ final class MacPetSpriteAnimator: ObservableObject {
     private var randomActionClip: PetAnimationClip?
     private var nextRandomActionAt = Date().addingTimeInterval(6)
     private var frameIndex = 0
+    private var lastFrameAdvanceAt = Date()
 
     init() {
         activeClip = Self.clips["seated_blink"]!
-        if let url = Self.spriteURL() {
-            sheet = NSImage(contentsOf: url)
-        } else {
-            sheet = nil
-        }
-        render()
+    }
+
+    var frame: MacPetSpriteFrameSnapshot {
+        snapshot(for: activeClip.frames[frameIndex % activeClip.frames.count])
     }
 
     var currentFrameInterval: TimeInterval {
         activeClip.frameInterval
     }
 
-    var horizontalScale: CGFloat {
-        frame.flipsWithDirection && crawlDirection == .left ? -1 : 1
+    var presentation: MacPetSpritePresentation {
+        let frameRef = activeClip.frames[frameIndex % activeClip.frames.count]
+        return MacPetSpritePresentation(
+            frame: snapshot(for: frameRef),
+            contentsRect: contentsRect(for: frameRef),
+            horizontalScale: activeClip.flipsWithDirection && crawlDirection == .left ? -1 : 1)
     }
 
-    func setMood(_ mood: String) {
+    @discardableResult
+    func setMood(_ mood: String) -> Bool {
         guard self.mood != mood else {
-            return
+            return false
         }
+
         self.mood = mood
         randomActionClip = nil
         scheduleRandomAction()
-        _ = selectClip(forceReset: true)
-        render()
+        return selectClip(forceReset: true)
     }
 
-    func setCrawlDirection(_ direction: MacPetCrawlDirection?) {
+    @discardableResult
+    func setCrawlDirection(_ direction: MacPetCrawlDirection?) -> Bool {
         guard crawlDirection != direction else {
-            return
+            return false
         }
+
         crawlDirection = direction
         if direction != nil {
             randomActionClip = nil
         }
-        _ = selectClip(forceReset: true)
-        render()
+        return selectClip(forceReset: true)
     }
 
-    func setHovering(_ hovering: Bool) {
+    @discardableResult
+    func setHovering(_ hovering: Bool) -> Bool {
         guard isHovering != hovering else {
-            return
+            return false
         }
+
         isHovering = hovering
         if hovering {
             randomActionClip = nil
         }
-        _ = selectClip(forceReset: true)
-        render()
+        return selectClip(forceReset: true)
     }
 
-    func advanceFrame() {
+    @discardableResult
+    func advanceFrameIfDue(at date: Date) -> Bool {
+        guard date.timeIntervalSince(lastFrameAdvanceAt) >= currentFrameInterval else {
+            return false
+        }
+
+        lastFrameAdvanceAt = date
+        return advanceFrame()
+    }
+
+    private func advanceFrame() -> Bool {
         let changed = selectClip(forceReset: false)
         if !changed, !activeClip.loops, frameIndex >= activeClip.frames.count - 1 {
             randomActionClip = nil
             scheduleRandomAction()
-            _ = selectClip(forceReset: true)
+            return selectClip(forceReset: true)
         } else if !changed {
             frameIndex = (frameIndex + 1) % activeClip.frames.count
+            return true
         }
-        render()
+
+        return changed
     }
 
     private func selectClip(forceReset: Bool) -> Bool {
@@ -115,18 +127,19 @@ final class MacPetSpriteAnimator: ObservableObject {
         if forceReset || selected.name != activeClip.name {
             activeClip = selected
             frameIndex = 0
+            lastFrameAdvanceAt = Date()
             return true
         }
         return false
     }
 
     private func resolveClip() -> PetAnimationClip {
-        if crawlDirection != nil {
-            return Self.clips["patrol_crawl"]!
-        }
         if isHovering || ["error", "waiting", "power"].contains(mood) {
             randomActionClip = nil
             return Self.clips["attention_paw"]!
+        }
+        if crawlDirection != nil {
+            return Self.clips["patrol_crawl"]!
         }
         if mood == "sleeping" {
             randomActionClip = nil
@@ -142,9 +155,8 @@ final class MacPetSpriteAnimator: ObservableObject {
         return baseClip(for: mood)
     }
 
-    private func render() {
-        let frameRef = activeClip.frames[frameIndex % activeClip.frames.count]
-        frame = MacPetSpriteFrameSnapshot(
+    private func snapshot(for frameRef: PetSpriteFrameRef) -> MacPetSpriteFrameSnapshot {
+        MacPetSpriteFrameSnapshot(
             pose: activeClip.pose,
             column: frameRef.column,
             row: frameRef.row,
@@ -153,24 +165,14 @@ final class MacPetSpriteAnimator: ObservableObject {
             motionOffsetX: frameRef.motionOffsetX,
             motionOffsetY: frameRef.motionOffsetY,
             flipsWithDirection: activeClip.flipsWithDirection)
-        image = crop(frameRef)
     }
 
-    private func crop(_ frame: PetSpriteFrameRef) -> NSImage? {
-        guard let sheet, let cgImage = sheet.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-
-        let rect = CGRect(
-            x: frame.column * Self.frameWidth,
-            y: Self.sheetHeight - ((frame.row + 1) * Self.frameHeight),
-            width: Self.frameWidth,
-            height: Self.frameHeight)
-        guard let cropped = cgImage.cropping(to: rect) else {
-            return nil
-        }
-
-        return NSImage(cgImage: cropped, size: NSSize(width: Self.frameWidth, height: Self.frameHeight))
+    private func contentsRect(for frame: PetSpriteFrameRef) -> CGRect {
+        CGRect(
+            x: CGFloat(frame.column * Self.frameWidth) / CGFloat(Self.sheetWidth),
+            y: CGFloat(Self.sheetHeight - ((frame.row + 1) * Self.frameHeight)) / CGFloat(Self.sheetHeight),
+            width: CGFloat(Self.frameWidth) / CGFloat(Self.sheetWidth),
+            height: CGFloat(Self.frameHeight) / CGFloat(Self.sheetHeight))
     }
 
     private func chooseRandomAction() -> PetAnimationClip {
@@ -220,28 +222,6 @@ final class MacPetSpriteAnimator: ObservableObject {
         return Dictionary(uniqueKeysWithValues: clips.map { ($0.name, $0) })
     }
 
-    private static func spriteURL() -> URL? {
-        if let resourceURL = Bundle.main.resourceURL?
-            .appendingPathComponent("VibestickMac_VibestickApp.bundle", isDirectory: true),
-           let bundle = Bundle(url: resourceURL),
-           let url = spriteURL(in: bundle)
-        {
-            return url
-        }
-
-        return spriteURL(in: Bundle.module)
-    }
-
-    private static func spriteURL(in bundle: Bundle) -> URL? {
-        bundle.url(
-            forResource: "golden-shaded-cat-spritesheet.cleaned",
-            withExtension: "png",
-            subdirectory: "PetSprites")
-            ?? bundle.url(
-                forResource: "golden-shaded-cat-spritesheet.cleaned",
-                withExtension: "png")
-    }
-
     private static func row(_ row: Int, _ firstColumn: Int, _ lastColumn: Int) -> [PetSpriteFrameRef] {
         (firstColumn...lastColumn).map { PetSpriteFrameRef(column: $0, row: row) }
     }
@@ -268,6 +248,118 @@ final class MacPetSpriteAnimator: ObservableObject {
         case 6: (0, -6)
         default: (-2, -2)
         }
+    }
+}
+
+@MainActor
+final class MacPetSpriteLayerView: NSView {
+    private static let spriteSize = CGSize(width: 194, height: 210)
+
+    private let spriteLayer = CALayer()
+    private let fallbackLayer = CATextLayer()
+    private var currentPresentation: MacPetSpritePresentation?
+    private var currentGlowColor = NSColor.systemPurple
+    private var currentHovering = false
+
+    init() {
+        super.init(frame: NSRect(origin: .zero, size: Self.spriteSize))
+        wantsLayer = true
+        layer = CALayer()
+        layer?.masksToBounds = false
+
+        spriteLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        spriteLayer.bounds = CGRect(origin: .zero, size: Self.spriteSize)
+        spriteLayer.contentsGravity = .resize
+        spriteLayer.magnificationFilter = .nearest
+        spriteLayer.minificationFilter = .nearest
+        spriteLayer.shadowOffset = CGSize(width: 0, height: -7)
+        spriteLayer.shadowOpacity = 0.34
+        spriteLayer.shadowRadius = 9
+        layer?.addSublayer(spriteLayer)
+
+        fallbackLayer.string = "missing cat sprite"
+        fallbackLayer.alignmentMode = .center
+        fallbackLayer.foregroundColor = NSColor.labelColor.cgColor
+        fallbackLayer.fontSize = 12
+        fallbackLayer.isHidden = true
+        layer?.addSublayer(fallbackLayer)
+
+        loadSpritesheet()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func layout() {
+        super.layout()
+        applyCurrentPresentation()
+    }
+
+    func apply(_ presentation: MacPetSpritePresentation, glowColor: NSColor, hovering: Bool) {
+        currentPresentation = presentation
+        currentGlowColor = glowColor
+        currentHovering = hovering
+        applyCurrentPresentation()
+    }
+
+    private func loadSpritesheet() {
+        guard let url = Self.spriteURL(),
+              let image = NSImage(contentsOf: url),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else {
+            spriteLayer.isHidden = true
+            fallbackLayer.isHidden = false
+            return
+        }
+
+        spriteLayer.contents = cgImage
+        spriteLayer.isHidden = false
+        fallbackLayer.isHidden = true
+    }
+
+    private func applyCurrentPresentation() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        fallbackLayer.frame = bounds
+        guard let presentation = currentPresentation, spriteLayer.contents != nil else {
+            return
+        }
+
+        spriteLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        spriteLayer.position = CGPoint(
+            x: bounds.midX + CGFloat(presentation.frame.motionOffsetX),
+            y: bounds.midY - CGFloat(presentation.frame.motionOffsetY))
+        spriteLayer.contentsRect = presentation.contentsRect
+        spriteLayer.transform = CATransform3DMakeScale(presentation.horizontalScale, 1, 1)
+        spriteLayer.shadowColor = currentGlowColor.cgColor
+        spriteLayer.shadowOpacity = currentHovering ? 0.72 : 0.34
+        spriteLayer.shadowRadius = currentHovering ? 18 : 9
+    }
+
+    private static func spriteURL() -> URL? {
+        if let resourceURL = Bundle.main.resourceURL?
+            .appendingPathComponent("VibestickMac_VibestickApp.bundle", isDirectory: true),
+           let bundle = Bundle(url: resourceURL),
+           let url = spriteURL(in: bundle)
+        {
+            return url
+        }
+
+        return spriteURL(in: Bundle.module)
+    }
+
+    private static func spriteURL(in bundle: Bundle) -> URL? {
+        bundle.url(
+            forResource: "golden-shaded-cat-spritesheet.cleaned",
+            withExtension: "png",
+            subdirectory: "PetSprites")
+            ?? bundle.url(
+                forResource: "golden-shaded-cat-spritesheet.cleaned",
+                withExtension: "png")
     }
 }
 

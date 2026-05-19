@@ -44,35 +44,44 @@ public enum HelperClientError: Error, LocalizedError, Equatable {
 public final class SubprocessHelperClient: HelperClienting, @unchecked Sendable {
     public let helperPath: String
     private let runner: CommandRunning
+    private let authorizeMutatingCommands: Bool
 
     public init(
         helperPath: String = ProcessInfo.processInfo.environment["VIBESTICK_HELPER_PATH"]
             ?? VibestickPaths.installedHelperPath,
-        runner: CommandRunning = ProcessCommandRunner()
+        runner: CommandRunning = ProcessCommandRunner(),
+        authorizeMutatingCommands: Bool? = nil
     ) {
         self.helperPath = helperPath
         self.runner = runner
+        if let authorizeMutatingCommands {
+            self.authorizeMutatingCommands = authorizeMutatingCommands
+        } else {
+            self.authorizeMutatingCommands =
+                ProcessInfo.processInfo.environment["VIBESTICK_HELPER_USE_ADMIN"] == "1"
+                || helperPath == VibestickPaths.installedHelperPath
+        }
     }
 
     public func status() throws -> HelperStatus {
-        try runJSON(["--json", "status"], as: HelperStatus.self)
+        try runJSON(["--json", "status"], as: HelperStatus.self, requiresPrivilege: false)
     }
 
     public func applyOn() throws -> ModeChangeResult {
-        try runJSON(["--json", "apply-on"], as: ModeChangeResult.self)
+        try runJSON(["--json", "apply-on"], as: ModeChangeResult.self, requiresPrivilege: true)
     }
 
     public func applyHyper() throws -> ModeChangeResult {
-        try runJSON(["--json", "apply-hyper"], as: ModeChangeResult.self)
+        try runJSON(["--json", "apply-hyper"], as: ModeChangeResult.self, requiresPrivilege: true)
     }
 
     public func restore() throws -> ModeChangeResult {
-        try runJSON(["--json", "restore"], as: ModeChangeResult.self)
+        try runJSON(["--json", "restore"], as: ModeChangeResult.self, requiresPrivilege: true)
     }
 
-    private func runJSON<T: Decodable>(_ arguments: [String], as type: T.Type) throws -> T {
+    private func runJSON<T: Decodable>(_ arguments: [String], as type: T.Type, requiresPrivilege: Bool) throws -> T {
         do {
-            let result = try runner.runChecked(helperPath, arguments)
+            let result = try runHelper(arguments: arguments, requiresPrivilege: requiresPrivilege)
             return try VibestickJSON.decoder.decode(type, from: Data(result.standardOutput.utf8))
         } catch CommandRunError.nonZero(let result) {
             if let status = try? VibestickJSON.decoder.decode(HelperStatus.self, from: Data(result.standardOutput.utf8)),
@@ -81,6 +90,28 @@ public final class SubprocessHelperClient: HelperClienting, @unchecked Sendable 
             }
             throw CommandRunError.nonZero(result)
         }
+    }
+
+    private func runHelper(arguments: [String], requiresPrivilege: Bool) throws -> CommandResult {
+        if requiresPrivilege && authorizeMutatingCommands {
+            let command = ([helperPath] + arguments)
+                .map(Self.shellQuote)
+                .joined(separator: " ")
+            let appleScript = "do shell script \"\(Self.escapeAppleScriptString(command))\" with administrator privileges"
+            return try runner.runChecked("/usr/bin/osascript", ["-e", appleScript])
+        }
+
+        return try runner.runChecked(helperPath, arguments)
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private static func escapeAppleScriptString(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }
 

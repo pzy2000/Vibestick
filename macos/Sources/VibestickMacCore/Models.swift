@@ -148,6 +148,17 @@ public struct CoderAgentStatus: Codable, Equatable, Sendable {
     public let sourcePath: String?
     public let taskDetail: String?
 
+    public var identity: String {
+        let cleanAgent = agent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identityAgent = cleanAgent.isEmpty ? "coder" : cleanAgent
+        guard let sessionId = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty
+        else {
+            return identityAgent
+        }
+        return "\(identityAgent):\(sessionId)"
+    }
+
     public init(
         agent: String,
         phase: CoderAgentPhase,

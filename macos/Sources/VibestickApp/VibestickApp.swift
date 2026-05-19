@@ -1,5 +1,4 @@
 import AppKit
-import ServiceManagement
 import SwiftUI
 import VibestickMacCore
 
@@ -14,7 +13,7 @@ struct VibestickMacApp: App {
         }
         .commands {
             CommandGroup(replacing: .appTermination) {
-                Button("Quit Vibestick") {
+                Button("退出 Vibestick") {
                     NSApplication.shared.terminate(nil)
                 }
                 .keyboardShortcut("q")
@@ -27,6 +26,7 @@ struct VibestickMacApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let viewModel = VibestickViewModel()
     private var statusItem: NSStatusItem?
+    private var petToggleMenuItem: NSMenuItem?
     private var petWindow: PetPanel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -43,29 +43,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "Vibestick"
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open Control Panel", action: #selector(openControlPanel), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Show Pet", action: #selector(showPetAction), keyEquivalent: ""))
+        let openControlPanel = NSMenuItem(title: "打开控制面板", action: #selector(openControlPanel), keyEquivalent: "")
+        openControlPanel.target = self
+        menu.addItem(openControlPanel)
+
+        let petToggle = NSMenuItem(title: "显示桌宠", action: #selector(togglePetAction), keyEquivalent: "")
+        petToggle.target = self
+        menu.addItem(petToggle)
+        petToggleMenuItem = petToggle
+
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+        let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
         item.menu = menu
         statusItem = item
+        updatePetToggleMenuTitle()
     }
 
     @objc private func openControlPanel() {
         NSApplication.shared.activate(ignoringOtherApps: true)
-        NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.windows.first { !($0 is PetPanel) }?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func showPetAction() {
-        showPet()
+    @objc private func togglePetAction() {
+        togglePet()
     }
 
     private func showPet() {
         if petWindow == nil {
-            petWindow = PetPanel(viewModel: viewModel)
+            petWindow = PetPanel(
+                viewModel: viewModel,
+                openControlPanel: { [weak self] in self?.openControlPanel() },
+                hidePet: { [weak self] in self?.hidePet() },
+                quitApplication: { [weak self] in self?.quit() })
         }
         petWindow?.orderFrontRegardless()
         petWindow?.startWalking()
+        updatePetToggleMenuTitle()
+    }
+
+    private func hidePet() {
+        guard let petWindow else {
+            updatePetToggleMenuTitle()
+            return
+        }
+
+        petWindow.close()
+        self.petWindow = nil
+        updatePetToggleMenuTitle()
+    }
+
+    private func togglePet() {
+        if petWindow?.isVisible == true {
+            hidePet()
+            return
+        }
+
+        showPet()
+    }
+
+    private func updatePetToggleMenuTitle() {
+        petToggleMenuItem?.title = petWindow?.isVisible == true ? "隐藏桌宠" : "显示桌宠"
     }
 
     @objc private func quit() {
@@ -75,21 +114,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 final class VibestickViewModel: ObservableObject {
-    @Published var statusText = "Loading..."
-    @Published var doctorText = "Doctor not run yet."
+    @Published var statusText = "正在读取状态..."
+    @Published var doctorText = "尚未运行诊断。"
     @Published var petMood = "idle"
     @Published var petTitle = "Vibestick"
-    @Published var petMessage = "Loading..."
+    @Published var petMessage = "正在读取状态..."
     @Published var petCoders: [CoderAgentStatus] = []
     @Published var helperInstallMessage = ""
+    @Published var isInstallingHelper = false
 
-    private let runner = ProcessCommandRunner()
     private let assertionManager: MacSleepAssertionManager
     private let engine: VibestickMacEngine
     private let doctor: MacDoctorService
+    private let helperInstaller: HelperInstalling
     private let coderSource: CompositeCoderStatusSource
     private let petResolver = PetStateResolver()
     private var refreshTimer: Timer?
+    private var refreshTask: Task<Void, Never>?
 
     init() {
         let helper = SubprocessHelperClient()
@@ -97,6 +138,7 @@ final class VibestickViewModel: ObservableObject {
         let processInspector = MacProcessInspector()
         let assertionManager = MacSleepAssertionManager()
         self.assertionManager = assertionManager
+        self.helperInstaller = MacHelperInstaller()
         self.engine = VibestickMacEngine(
             helper: helper,
             battery: battery,
@@ -109,6 +151,7 @@ final class VibestickViewModel: ObservableObject {
             assertionManager: assertionManager)
         self.coderSource = CompositeCoderStatusSource([
             JsonFileCoderStatusSource(),
+            CodexSessionStatusSource(),
             ProcessCoderStatusSource(processInspector: processInspector, processNames: VibestickOptions().longTaskProcessNames)
         ])
         self.refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -119,17 +162,38 @@ final class VibestickViewModel: ObservableObject {
     }
 
     func refresh() {
-        let status = engine.status()
-        statusText = """
-        Mode: \(status.activeMode.rawValue)
-        Restore pending: \(status.restorePending ? "yes" : "no")
-        HYPER assertion: \(status.assertionActive ? "active" : "inactive")
-        Battery: \(status.battery.percentage.map { "\($0)%" } ?? "unknown"), AC connected=\(status.battery.isACConnected)
-        pmset sleep: battery=\(status.pmset?.value("sleep", source: .battery) ?? "-"), ac=\(status.pmset?.value("sleep", source: .ac) ?? "-")
-        """
+        guard refreshTask == nil else {
+            return
+        }
 
-        let coders = coderSource.getStatuses(now: Date())
-        let pet = petResolver.resolve(status: status, coders: coders)
+        let engine = engine
+        let helperInstaller = helperInstaller
+        let coderSource = coderSource
+        let petResolver = petResolver
+        refreshTask = Task.detached(priority: .utility) { [weak self] in
+            let status = engine.status()
+            let helperPreflight = helperInstaller.preflight()
+            let coders = coderSource.getStatuses(now: Date())
+            let pet = petResolver.resolve(status: status, coders: coders)
+
+            await MainActor.run {
+                self?.finishRefresh(
+                    status: status,
+                    helperPreflight: helperPreflight,
+                    coders: coders,
+                    pet: pet)
+            }
+        }
+    }
+
+    private func finishRefresh(
+        status: VibestickStatus,
+        helperPreflight: HelperInstallPreflight,
+        coders: [CoderAgentStatus],
+        pet: PetState)
+    {
+        refreshTask = nil
+        statusText = formatStatus(status, helperPreflight: helperPreflight)
         petMood = pet.mood
         petTitle = pet.title
         petMessage = pet.message
@@ -145,10 +209,15 @@ final class VibestickViewModel: ObservableObject {
 
     func apply(_ mode: VibestickMode) {
         do {
-            _ = try engine.applyMode(mode)
+            let result = try engine.applyMode(mode)
+            helperInstallMessage = result.message
             refresh()
         } catch {
-            statusText = "Error: \(error.localizedDescription)"
+            let message = friendlyApplyError(error, mode: mode)
+            helperInstallMessage = message
+            refresh()
+            statusText += "\n操作失败：\(message)"
+            doctorText = "详细错误：\(error.localizedDescription)"
         }
     }
 
@@ -161,17 +230,108 @@ final class VibestickViewModel: ObservableObject {
         _ = AccessibilityStatus.isTrusted(prompt: true)
     }
 
-    func registerHelper() {
-        if #available(macOS 13.0, *) {
-            do {
-                try SMAppService.daemon(plistName: "com.pzy.vibestick.helper.plist").register()
-                helperInstallMessage = "Helper registration requested."
-            } catch {
-                helperInstallMessage = "Helper registration failed: \(error.localizedDescription)"
-            }
-        } else {
-            helperInstallMessage = "Helper registration requires macOS 13 or newer."
+    func installHelper() {
+        guard !isInstallingHelper else {
+            return
         }
+
+        isInstallingHelper = true
+        helperInstallMessage = "正在请求管理员授权安装 Helper..."
+        let installer = helperInstaller
+
+        Task.detached {
+            let result = Result { try installer.install() }
+            await MainActor.run {
+                self.isInstallingHelper = false
+                switch result {
+                case .success(let installResult):
+                    self.helperInstallMessage = installResult.message
+                    self.refresh()
+                    self.runDoctor()
+                case .failure(let error):
+                    self.helperInstallMessage = error.localizedDescription
+                    self.runDoctor()
+                }
+            }
+        }
+    }
+
+    private func formatStatus(_ status: VibestickStatus, helperPreflight: HelperInstallPreflight) -> String {
+        var lines = [
+            "当前模式：\(displayMode(status.activeMode))",
+            "恢复状态：\(status.restorePending ? "有待恢复的 pmset 备份" : "无需恢复")",
+            "HYPER 守护：\(status.assertionActive ? "正在保持唤醒" : "未运行")",
+            "电池/电源：\(formatBattery(status.battery))",
+            "睡眠策略：\(formatSleepPolicy(status.pmset, helperPreflight: helperPreflight))",
+            "Helper：\(formatHelperStatus(helperPreflight))"
+        ]
+
+        if let warning = status.warnings.first {
+            lines.append("提示：\(friendlyError(warning))")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func formatBattery(_ battery: BatteryInfo) -> String {
+        guard battery.isAvailable else {
+            return "无法读取"
+        }
+        let percent = battery.percentage.map { "\($0)%" } ?? "未知电量"
+        return "\(percent)，\(battery.isACConnected ? "已连接外接电源" : "正在使用电池")"
+    }
+
+    private func formatSleepPolicy(_ snapshot: PmsetSnapshot?, helperPreflight: HelperInstallPreflight) -> String {
+        guard let snapshot else {
+            if !helperPreflight.isInstalled {
+                return "暂不可读；请先安装 Helper"
+            }
+            return "暂不可读；请运行诊断查看 Helper 与 pmset 状态"
+        }
+        let battery = snapshot.value("sleep", source: .battery) ?? "未知"
+        let ac = snapshot.value("sleep", source: .ac) ?? "未知"
+        return "电池=\(battery)，外接电源=\(ac)"
+    }
+
+    private func formatHelperStatus(_ preflight: HelperInstallPreflight) -> String {
+        if preflight.isInstalled {
+            return "已安装"
+        }
+        if preflight.isReadyToInstall {
+            return "未安装，可点击“安装 Helper”"
+        }
+        return "安装资源缺失，请先重新构建 macOS app"
+    }
+
+    private func displayMode(_ mode: VibestickMode) -> String {
+        switch mode {
+        case .off:
+            return "关闭"
+        case .on:
+            return "保持唤醒"
+        case .hyper:
+            return "HYPER"
+        }
+    }
+
+    private func friendlyApplyError(_ error: Error, mode: VibestickMode) -> String {
+        let preflight = helperInstaller.preflight()
+        if !preflight.isInstalled {
+            switch mode {
+            case .off:
+                return "需要先安装 Helper 才能恢复 pmset 睡眠策略。"
+            case .on, .hyper:
+                return "需要先安装 Helper 才能修改 macOS 睡眠策略。"
+            }
+        }
+        return friendlyError(error.localizedDescription)
+    }
+
+    private func friendlyError(_ message: String) -> String {
+        if message.contains(VibestickPaths.installedHelperPath) || message.localizedCaseInsensitiveContains("failed to start") {
+            return "Helper 尚未安装或无法启动，请点击“安装 Helper”。"
+        }
+        return message
     }
 }
 
@@ -181,10 +341,10 @@ struct ControlPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Button("OFF") { viewModel.apply(.off) }
-                Button("ON") { viewModel.apply(.on) }
+                Button("关闭") { viewModel.apply(.off) }
+                Button("保持唤醒") { viewModel.apply(.on) }
                 Button("HYPER") { viewModel.apply(.hyper) }
-                Button("Stop HYPER Guard") { viewModel.stopHyperAssertion() }
+                Button("停止 HYPER") { viewModel.stopHyperAssertion() }
             }
             .buttonStyle(.borderedProminent)
 
@@ -193,10 +353,11 @@ struct ControlPanelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack {
-                Button("Refresh") { viewModel.refresh() }
-                Button("Doctor") { viewModel.runDoctor() }
-                Button("Install Helper") { viewModel.registerHelper() }
-                Button("Accessibility") { viewModel.requestAccessibility() }
+                Button("刷新") { viewModel.refresh() }
+                Button("诊断") { viewModel.runDoctor() }
+                Button(viewModel.isInstallingHelper ? "安装中..." : "安装 Helper") { viewModel.installHelper() }
+                    .disabled(viewModel.isInstallingHelper)
+                Button("辅助功能授权") { viewModel.requestAccessibility() }
             }
 
             if !viewModel.helperInstallMessage.isEmpty {
@@ -216,24 +377,48 @@ struct ControlPanelView: View {
 }
 
 @MainActor
-final class PetPanel: NSPanel {
+final class PetPanel: NSPanel, NSMenuDelegate {
+    private static let walkingEnabledDefaultsKey = "VibestickPetWalkingEnabled"
+
     private let viewModel: VibestickViewModel
-    private var walkTimer: Timer?
+    private let openControlPanel: () -> Void
+    private let hidePet: () -> Void
+    private let quitApplication: () -> Void
+    private let walkingToggleMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let spriteAnimator = MacPetSpriteAnimator()
+    private let spriteLayerView = MacPetSpriteLayerView()
+    private var displayLink: MacPetDisplayLink?
     private var pauseUntil: Date?
     private var lastTick: Date?
     private var direction: MacPetCrawlDirection = .left
+    private var walkingEnabled = PetPanel.loadWalkingEnabled()
+    private var spriteHovering = false
     private let walkSpeed: CGFloat = 56
     private let bottomMargin: CGFloat = 16
 
-    init(viewModel: VibestickViewModel) {
+    init(
+        viewModel: VibestickViewModel,
+        openControlPanel: @escaping () -> Void,
+        hidePet: @escaping () -> Void,
+        quitApplication: @escaping () -> Void)
+    {
         self.viewModel = viewModel
-        let hosting = NSHostingView(rootView: PetView(viewModel: viewModel))
+        self.openControlPanel = openControlPanel
+        self.hidePet = hidePet
+        self.quitApplication = quitApplication
         super.init(
-            contentRect: NSRect(x: 120, y: 120, width: 356, height: 560),
+            contentRect: NSRect(x: 120, y: 120, width: 356, height: 476),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false)
+        let hosting = PetHostingView(rootView: PetView(
+            viewModel: viewModel,
+            spriteLayerView: spriteLayerView,
+            onHoverChanged: { [weak self] hovering in
+                self?.setSpriteHovering(hovering)
+            }))
         contentView = hosting
+        hosting.petContextMenu = buildContextMenu()
         isOpaque = false
         backgroundColor = .clear
         level = .floating
@@ -243,22 +428,43 @@ final class PetPanel: NSPanel {
 
     func startWalking() {
         alignToWalkLane()
-        walkTimer?.invalidate()
-        walkTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.walkTick()
-            }
+        displayLink?.invalidate()
+        let displayLink = MacPetDisplayLink { [weak self] date in
+            self?.displayTick(at: date)
         }
+        self.displayLink = displayLink
+        displayLink.start()
+        updateSpritePresentation(at: Date(), force: true)
     }
 
-    private func walkTick() {
+    func menuWillOpen(_ menu: NSMenu) {
+        updateWalkingMenuText()
+    }
+
+    override func close() {
+        displayLink?.invalidate()
+        displayLink = nil
+        super.close()
+    }
+
+    private func displayTick(at now: Date) {
         guard isVisible else {
             return
         }
 
-        let now = Date()
+        updateWalkPosition(at: now)
+        let frameChanged = spriteAnimator.advanceFrameIfDue(at: now)
+        updateSpritePresentation(at: now, force: frameChanged)
+    }
+
+    private func updateWalkPosition(at now: Date) {
+        guard walkingEnabled else {
+            pauseUntil = nil
+            lastTick = now
+            return
+        }
+
         if let pauseUntil, now < pauseUntil {
-            viewModel.petMood = viewModel.petMood
             lastTick = now
             return
         }
@@ -287,10 +493,7 @@ final class PetPanel: NSPanel {
             pauseUntil = now.addingTimeInterval(1)
         }
 
-        setFrame(next, display: true, animate: false)
-        NotificationCenter.default.post(
-            name: .vibestickPetWalkDirectionChanged,
-            object: direction)
+        setFrameOrigin(next.origin)
     }
 
     private func alignToWalkLane() {
@@ -300,16 +503,174 @@ final class PetPanel: NSPanel {
         var next = frame
         next.origin.y = screen.visibleFrame.minY + bottomMargin
         next.origin.x = min(max(next.origin.x, screen.visibleFrame.minX), screen.visibleFrame.maxX - next.width)
-        setFrame(next, display: true, animate: false)
+        setFrameOrigin(next.origin)
+    }
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = self
+
+        let open = NSMenuItem(title: "打开控制面板", action: #selector(openControlPanelFromMenu), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+
+        let refresh = NSMenuItem(title: "刷新桌宠", action: #selector(refreshPetFromMenu), keyEquivalent: "")
+        refresh.target = self
+        menu.addItem(refresh)
+
+        walkingToggleMenuItem.target = self
+        walkingToggleMenuItem.action = #selector(toggleWalkingFromMenu)
+        updateWalkingMenuText()
+        menu.addItem(walkingToggleMenuItem)
+
+        let hide = NSMenuItem(title: "隐藏桌宠", action: #selector(hidePetFromMenu), keyEquivalent: "")
+        hide.target = self
+        menu.addItem(hide)
+
+        menu.addItem(.separator())
+
+        let exit = NSMenuItem(title: "退出 Vibestick", action: #selector(quitFromMenu), keyEquivalent: "")
+        exit.target = self
+        menu.addItem(exit)
+
+        return menu
+    }
+
+    @objc private func openControlPanelFromMenu() {
+        openControlPanel()
+    }
+
+    @objc private func refreshPetFromMenu() {
+        viewModel.refresh()
+    }
+
+    @objc private func toggleWalkingFromMenu() {
+        walkingEnabled.toggle()
+        UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
+        pauseUntil = nil
+        lastTick = nil
+
+        if walkingEnabled {
+            alignToWalkLane()
+        }
+
+        updateWalkingMenuText()
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    @objc private func quitFromMenu() {
+        quitApplication()
+    }
+
+    @objc private func hidePetFromMenu() {
+        hidePet()
+    }
+
+    private func updateWalkingMenuText() {
+        walkingToggleMenuItem.title = walkingEnabled ? "暂停行走" : "恢复行走"
+    }
+
+    private static func loadWalkingEnabled() -> Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: walkingEnabledDefaultsKey) != nil else {
+            return true
+        }
+        return defaults.bool(forKey: walkingEnabledDefaultsKey)
+    }
+
+    private func setSpriteHovering(_ hovering: Bool) {
+        spriteHovering = hovering
+        updateSpritePresentation(at: Date())
+    }
+
+    private func updateSpritePresentation(at now: Date, force: Bool = false) {
+        let moodChanged = spriteAnimator.setMood(viewModel.petMood)
+        let hoverChanged = spriteAnimator.setHovering(spriteHovering)
+        let directionChanged = spriteAnimator.setCrawlDirection(activeCrawlDirection(at: now))
+        guard force || moodChanged || hoverChanged || directionChanged else {
+            return
+        }
+
+        spriteLayerView.apply(
+            spriteAnimator.presentation,
+            glowColor: glowColor(for: viewModel.petMood),
+            hovering: spriteHovering)
+    }
+
+    private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
+        guard walkingEnabled, !spriteHovering else {
+            return nil
+        }
+        if let pauseUntil, pauseUntil > now {
+            return nil
+        }
+        return direction
+    }
+
+    private func glowColor(for mood: String) -> NSColor {
+        switch mood {
+        case "power": .systemOrange
+        case "running": .systemGreen
+        case "reasoning": .systemBlue
+        case "waiting": .systemYellow
+        case "error": .systemRed
+        case "success": .systemMint
+        case "offline": .systemGray
+        default: .systemPurple
+        }
+    }
+}
+
+@MainActor
+private final class PetHostingView: NSHostingView<PetView> {
+    var petContextMenu: NSMenu? {
+        didSet {
+            menu = petContextMenu
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        showPetContextMenu(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) {
+            showPetContextMenu(with: event)
+            return
+        }
+
+        super.mouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        petContextMenu
+    }
+
+    private func showPetContextMenu(with event: NSEvent) {
+        guard let petContextMenu else {
+            super.rightMouseDown(with: event)
+            return
+        }
+
+        NSMenu.popUpContextMenu(petContextMenu, with: event, for: self)
     }
 }
 
 struct PetView: View {
     @ObservedObject var viewModel: VibestickViewModel
-    @StateObject private var animator = MacPetSpriteAnimator()
-    @State private var walkDirection: MacPetCrawlDirection? = .left
+    let spriteLayerView: MacPetSpriteLayerView
+    let onHoverChanged: (Bool) -> Void
     @State private var isHovering = false
-    @State private var frameTimer = Timer.publish(every: 0.36, on: .main, in: .common).autoconnect()
+
+    init(
+        viewModel: VibestickViewModel,
+        spriteLayerView: MacPetSpriteLayerView,
+        onHoverChanged: @escaping (Bool) -> Void)
+    {
+        self.viewModel = viewModel
+        self.spriteLayerView = spriteLayerView
+        self.onHoverChanged = onHoverChanged
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -326,65 +687,23 @@ struct PetView: View {
             .contentShape(Rectangle())
             .onHover { hovering in
                 isHovering = hovering
-                animator.setHovering(hovering)
-                if hovering {
-                    animator.setCrawlDirection(nil)
-                } else {
-                    animator.setCrawlDirection(walkDirection)
-                }
+                onHoverChanged(hovering)
             }
-            statusBubble
+            if viewModel.petCoders.isEmpty {
+                statusBubble
+            }
         }
         .padding(10)
-        .onAppear {
-            animator.setMood(viewModel.petMood)
-            animator.setCrawlDirection(walkDirection)
-        }
-        .onChange(of: viewModel.petMood) { _, mood in
-            animator.setMood(mood)
-        }
-        .onReceive(frameTimer) { _ in
-            animator.advanceFrame()
-            frameTimer = Timer.publish(every: animator.currentFrameInterval, on: .main, in: .common).autoconnect()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .vibestickPetWalkDirectionChanged)) { notification in
-            guard let direction = notification.object as? MacPetCrawlDirection else {
-                return
-            }
-            walkDirection = direction
-            if !isHovering {
-                animator.setCrawlDirection(direction)
-            }
-        }
     }
 
     private var sprite: some View {
-        Group {
-            if let image = animator.image {
-                Image(nsImage: image)
-                    .interpolation(.none)
-                    .resizable()
-                    .scaledToFit()
-                    .scaleEffect(x: animator.horizontalScale, y: 1)
-                    .offset(
-                        x: animator.frame.motionOffsetX,
-                        y: -animator.frame.motionOffsetY)
-                    .shadow(color: glowColor.opacity(isHovering ? 0.72 : 0.32), radius: isHovering ? 18 : 9)
-                    .shadow(color: .black.opacity(0.24), radius: 9, x: 0, y: 7)
-            } else {
-                Text("missing cat sprite")
-                    .font(.caption)
-                    .padding(8)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
-        .frame(width: 194, height: 210)
-        .animation(.easeOut(duration: 0.12), value: animator.frame)
+        MacPetSpriteRepresentable(spriteLayerView: spriteLayerView)
+            .frame(width: 194, height: 210)
     }
 
     private var taskCards: some View {
         VStack(spacing: 6) {
-            ForEach(viewModel.petCoders, id: \.agent) { coder in
+            ForEach(viewModel.petCoders, id: \.identity) { coder in
                 VStack(alignment: .leading, spacing: 3) {
                     Text(coder.taskSummary ?? coder.agent)
                         .font(.system(size: 15, weight: .semibold))
@@ -427,20 +746,15 @@ struct PetView: View {
         .shadow(color: .black.opacity(0.24), radius: 8, x: 0, y: 4)
     }
 
-    private var glowColor: Color {
-        switch viewModel.petMood {
-        case "power": .orange
-        case "running": .green
-        case "reasoning": .blue
-        case "waiting": .yellow
-        case "error": .red
-        case "success": .mint
-        case "offline": .gray
-        default: .purple
-        }
-    }
 }
 
-extension Notification.Name {
-    static let vibestickPetWalkDirectionChanged = Notification.Name("vibestickPetWalkDirectionChanged")
+private struct MacPetSpriteRepresentable: NSViewRepresentable {
+    let spriteLayerView: MacPetSpriteLayerView
+
+    func makeNSView(context: Context) -> MacPetSpriteLayerView {
+        spriteLayerView
+    }
+
+    func updateNSView(_ nsView: MacPetSpriteLayerView, context: Context) {
+    }
 }
