@@ -591,10 +591,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             return
         }
 
-        spriteLayerView.apply(
-            spriteAnimator.presentation,
-            glowColor: glowColor(for: viewModel.petMood),
-            hovering: spriteHovering)
+        spriteLayerView.apply(spriteAnimator.presentation)
     }
 
     private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
@@ -607,18 +604,6 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         return direction
     }
 
-    private func glowColor(for mood: String) -> NSColor {
-        switch mood {
-        case "power": .systemOrange
-        case "running": .systemGreen
-        case "reasoning": .systemBlue
-        case "waiting": .systemYellow
-        case "error": .systemRed
-        case "success": .systemMint
-        case "offline": .systemGray
-        default: .systemPurple
-        }
-    }
 }
 
 @MainActor

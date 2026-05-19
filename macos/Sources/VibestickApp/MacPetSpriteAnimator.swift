@@ -258,8 +258,6 @@ final class MacPetSpriteLayerView: NSView {
     private let spriteLayer = CALayer()
     private let fallbackLayer = CATextLayer()
     private var currentPresentation: MacPetSpritePresentation?
-    private var currentGlowColor = NSColor.systemPurple
-    private var currentHovering = false
 
     init() {
         super.init(frame: NSRect(origin: .zero, size: Self.spriteSize))
@@ -272,9 +270,6 @@ final class MacPetSpriteLayerView: NSView {
         spriteLayer.contentsGravity = .resize
         spriteLayer.magnificationFilter = .nearest
         spriteLayer.minificationFilter = .nearest
-        spriteLayer.shadowOffset = CGSize(width: 0, height: -7)
-        spriteLayer.shadowOpacity = 0.34
-        spriteLayer.shadowRadius = 9
         layer?.addSublayer(spriteLayer)
 
         fallbackLayer.string = "missing cat sprite"
@@ -297,10 +292,8 @@ final class MacPetSpriteLayerView: NSView {
         applyCurrentPresentation()
     }
 
-    func apply(_ presentation: MacPetSpritePresentation, glowColor: NSColor, hovering: Bool) {
+    func apply(_ presentation: MacPetSpritePresentation) {
         currentPresentation = presentation
-        currentGlowColor = glowColor
-        currentHovering = hovering
         applyCurrentPresentation()
     }
 
@@ -335,9 +328,6 @@ final class MacPetSpriteLayerView: NSView {
             y: bounds.midY - CGFloat(presentation.frame.motionOffsetY))
         spriteLayer.contentsRect = presentation.contentsRect
         spriteLayer.transform = CATransform3DMakeScale(presentation.horizontalScale, 1, 1)
-        spriteLayer.shadowColor = currentGlowColor.cgColor
-        spriteLayer.shadowOpacity = currentHovering ? 0.72 : 0.34
-        spriteLayer.shadowRadius = currentHovering ? 18 : 9
     }
 
     private static func spriteURL() -> URL? {
