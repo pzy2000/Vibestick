@@ -154,13 +154,38 @@ public final class CompositeCoderStatusSource: CoderStatusSourcing, @unchecked S
     }
 
     public func getStatuses(now: Date) -> [CoderAgentStatus] {
+        var byIdentity: [String: CoderAgentStatus] = [:]
         for source in sources {
+            if !byIdentity.isEmpty {
+                break
+            }
+
             let statuses = source.getStatuses(now: now)
-            if !statuses.isEmpty {
-                return statuses
+            for status in statuses {
+                if let existing = byIdentity[status.identity],
+                   Self.compareStatus(status, existing) == false {
+                    continue
+                }
+                byIdentity[status.identity] = status
             }
         }
-        return []
+
+        return byIdentity.values.sorted { lhs, rhs in
+            if phasePriority(lhs.phase) != phasePriority(rhs.phase) {
+                return phasePriority(lhs.phase) < phasePriority(rhs.phase)
+            }
+            if lhs.updatedAtUtc != rhs.updatedAtUtc {
+                return lhs.updatedAtUtc > rhs.updatedAtUtc
+            }
+            return lhs.agent.localizedCaseInsensitiveCompare(rhs.agent) == .orderedAscending
+        }
+    }
+
+    private static func compareStatus(_ lhs: CoderAgentStatus, _ rhs: CoderAgentStatus) -> Bool {
+        if phasePriority(lhs.phase) != phasePriority(rhs.phase) {
+            return phasePriority(lhs.phase) < phasePriority(rhs.phase)
+        }
+        return lhs.updatedAtUtc > rhs.updatedAtUtc
     }
 }
 

@@ -4,6 +4,8 @@ import VibestickMacCore
 let args = Array(CommandLine.arguments.dropFirst())
 let json = hasFlag("--json")
 let statusDirectory = option("--status-dir").map { URL(fileURLWithPath: $0) }
+let codexSessionsDirectory = option("--codex-sessions-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
+    ?? CodexSessionPaths.defaultSessionsRoot
 
 let options = VibestickOptions()
 let runner = ProcessCommandRunner()
@@ -26,6 +28,7 @@ let doctor = MacDoctorService(
 let coderDirectory = statusDirectory ?? VibestickPaths.coderStatusDirectory
 let coderSource = CompositeCoderStatusSource([
     JsonFileCoderStatusSource(directory: coderDirectory),
+    CodexSessionStatusSource(sessionsRoot: codexSessionsDirectory),
     ProcessCoderStatusSource(processInspector: processInspector, processNames: options.longTaskProcessNames)
 ])
 let coderWriter = CoderStatusWriter(directory: coderDirectory)
@@ -201,7 +204,7 @@ func printHelp() {
       vibestickctl doctor [--json]
       vibestickctl mode off|on|hyper [--json] [--once]
       vibestickctl revert [--json]
-      vibestickctl pet status [--json] [--status-dir <path>]
+      vibestickctl pet status [--json] [--status-dir <path>] [--codex-sessions-dir <path>]
       vibestickctl coder emit --phase <phase> [--agent <name>] [--message <text>] [--workspace <path>] [--pid <id>] [--ttl <seconds>] [--session-id <id>] [--summary <text>] [--detail <text>] [--source-path <path>] [--json] [--status-dir <path>]
       vibestickctl coder clear [--agent <name>] [--json] [--status-dir <path>]
     """)

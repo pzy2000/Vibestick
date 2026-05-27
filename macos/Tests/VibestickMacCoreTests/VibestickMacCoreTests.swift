@@ -139,6 +139,230 @@ final class VibestickMacCoreTests: XCTestCase {
         }
     }
 
+    func testSubprocessHelperClientRunsInstalledMutationsWithAdministratorPrivileges() throws {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+            {
+              "requested_mode": "on",
+              "applied_mode": "on",
+              "restore_pending": true,
+              "warnings": [],
+              "message": "ON mode applied."
+            }
+            """,
+            standardError: "")
+        let client = SubprocessHelperClient(
+            helperPath: VibestickPaths.installedHelperPath,
+            runner: runner)
+
+        let result = try client.applyOn()
+
+        XCTAssertEqual(result.appliedMode, .on)
+        let invocation = try XCTUnwrap(runner.invocations.first)
+        XCTAssertEqual(invocation[0], "/usr/bin/osascript")
+        XCTAssertEqual(invocation[1], "-e")
+        XCTAssertTrue(invocation[2].contains("with administrator privileges"))
+        XCTAssertTrue(invocation[2].contains("'/Library/PrivilegedHelperTools/com.pzy.vibestick.helper' '--json' 'apply-on'"))
+    }
+
+    func testSubprocessHelperClientKeepsStatusUnprivilegedForInstalledHelper() throws {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+            {
+              "ok": true,
+              "snapshot": null,
+              "backup": null,
+              "state_path": "/Library/Application Support/Vibestick/power-state.json"
+            }
+            """,
+            standardError: "")
+        let client = SubprocessHelperClient(
+            helperPath: VibestickPaths.installedHelperPath,
+            runner: runner)
+
+        let status = try client.status()
+
+        XCTAssertTrue(status.ok)
+        XCTAssertEqual(runner.invocations.first, [VibestickPaths.installedHelperPath, "--json", "status"])
+    }
+
+    func testSubprocessHelperClientUnwrapsPrivilegedHelperJsonError() {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 3,
+            standardOutput: """
+            {
+              "message": "Mac power policy changes require the privileged Vibestick helper.",
+              "ok": false,
+              "state_path": "/Library/Application Support/Vibestick/power-state.json"
+            }
+            """,
+            standardError: "")
+        let client = SubprocessHelperClient(
+            helperPath: VibestickPaths.installedHelperPath,
+            runner: runner)
+
+        XCTAssertThrowsError(try client.applyHyper()) { error in
+            XCTAssertEqual(
+                error as? HelperClientError,
+                .helperFailed("Mac power policy changes require the privileged Vibestick helper."))
+        }
+        XCTAssertEqual(runner.invocations.first?[0], "/usr/bin/osascript")
+    }
+
+    func testHelperInstallerBuildsPrivilegedLaunchDaemonInstallScript() throws {
+        let directory = temporaryDirectory()
+        let sourceHelper = try createExecutable(named: "VibestickHelper", in: directory)
+        let sourcePlist = directory.appendingPathComponent("com.pzy.vibestick.helper.plist")
+        FileManager.default.createFile(atPath: sourcePlist.path, contents: Data("<plist/>".utf8))
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        let paths = HelperInstallPaths(
+            sourceHelperPath: sourceHelper.path,
+            sourcePlistPath: sourcePlist.path,
+            installedHelperPath: "/tmp/com.pzy.vibestick.helper",
+            installedPlistPath: "/tmp/com.pzy.vibestick.helper.plist")
+        let installer = MacHelperInstaller(paths: paths, runner: runner)
+
+        let result = try installer.install()
+
+        XCTAssertEqual(result.installedHelperPath, "/tmp/com.pzy.vibestick.helper")
+        let invocation = try XCTUnwrap(runner.invocations.first)
+        XCTAssertEqual(invocation[0], "/usr/bin/osascript")
+        XCTAssertEqual(invocation[1], "-e")
+        XCTAssertTrue(invocation[2].contains("with administrator privileges"))
+        XCTAssertTrue(invocation[2].contains("install -o root -g wheel -m 755"))
+        XCTAssertTrue(invocation[2].contains("/private/tmp/VibestickHelperInstall-"))
+        XCTAssertFalse(invocation[2].contains(sourceHelper.path))
+        XCTAssertFalse(invocation[2].contains(sourcePlist.path))
+        XCTAssertTrue(invocation[2].contains("launchctl bootstrap system '/tmp/com.pzy.vibestick.helper.plist'"))
+        XCTAssertTrue(invocation[2].contains("launchctl enable system/'com.pzy.vibestick.helper'"))
+    }
+
+    func testHelperInstallerStagesReadableFilesAndCleansThemAfterSmokeInstall() throws {
+        let directory = temporaryDirectory()
+        let sourceHelper = try createExecutable(named: "VibestickHelper", in: directory)
+        let sourcePlist = directory.appendingPathComponent("com.pzy.vibestick.helper.plist")
+        FileManager.default.createFile(atPath: sourcePlist.path, contents: Data("<plist/>".utf8))
+        let runner = FakeRunner()
+        var stagedDirectoryPath: String?
+        runner.onRun = { executable, arguments in
+            XCTAssertEqual(executable, "/usr/bin/osascript")
+            let script = arguments.joined(separator: "\n")
+            let stageDirectory = try XCTUnwrap(extractStagedDirectory(from: script))
+            stagedDirectoryPath = stageDirectory
+            XCTAssertTrue(FileManager.default.isExecutableFile(atPath: "\(stageDirectory)/com.pzy.vibestick.helper"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: "\(stageDirectory)/com.pzy.vibestick.helper.plist"))
+            return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        }
+        let installer = MacHelperInstaller(
+            paths: HelperInstallPaths(sourceHelperPath: sourceHelper.path, sourcePlistPath: sourcePlist.path),
+            runner: runner)
+
+        _ = try installer.install()
+
+        XCTAssertNotNil(stagedDirectoryPath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(stagedDirectoryPath)))
+    }
+
+    func testHelperInstallerCleansStagingDirectoryAfterPrivilegedFailure() throws {
+        let directory = temporaryDirectory()
+        let sourceHelper = try createExecutable(named: "VibestickHelper", in: directory)
+        let sourcePlist = directory.appendingPathComponent("com.pzy.vibestick.helper.plist")
+        FileManager.default.createFile(atPath: sourcePlist.path, contents: Data("<plist/>".utf8))
+        let runner = FakeRunner()
+        var stagedDirectoryPath: String?
+        runner.onRun = { _, arguments in
+            stagedDirectoryPath = try XCTUnwrap(extractStagedDirectory(from: arguments.joined(separator: "\n")))
+            return CommandResult(exitCode: 1, standardOutput: "", standardError: "install failed")
+        }
+        let installer = MacHelperInstaller(
+            paths: HelperInstallPaths(sourceHelperPath: sourceHelper.path, sourcePlistPath: sourcePlist.path),
+            runner: runner)
+
+        XCTAssertThrowsError(try installer.install())
+
+        XCTAssertNotNil(stagedDirectoryPath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(stagedDirectoryPath)))
+    }
+
+    func testHelperInstallerFailsPreflightWhenSourceHelperIsMissing() throws {
+        let directory = temporaryDirectory()
+        let sourcePlist = directory.appendingPathComponent("com.pzy.vibestick.helper.plist")
+        FileManager.default.createFile(atPath: sourcePlist.path, contents: Data("<plist/>".utf8))
+        let runner = FakeRunner()
+        let installer = MacHelperInstaller(
+            paths: HelperInstallPaths(
+                sourceHelperPath: directory.appendingPathComponent("missing-helper").path,
+                sourcePlistPath: sourcePlist.path),
+            runner: runner)
+
+        XCTAssertThrowsError(try installer.install()) { error in
+            XCTAssertEqual(
+                error as? HelperInstallError,
+                .missingSourceHelper(directory.appendingPathComponent("missing-helper").path))
+        }
+        XCTAssertEqual(runner.invocations, [])
+    }
+
+    func testHelperInstallerMapsAdministratorCancelToFriendlyError() throws {
+        let directory = temporaryDirectory()
+        let sourceHelper = try createExecutable(named: "VibestickHelper", in: directory)
+        let sourcePlist = directory.appendingPathComponent("com.pzy.vibestick.helper.plist")
+        FileManager.default.createFile(atPath: sourcePlist.path, contents: Data("<plist/>".utf8))
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 1,
+            standardOutput: "",
+            standardError: "execution error: User canceled. (-128)")
+        let installer = MacHelperInstaller(
+            paths: HelperInstallPaths(sourceHelperPath: sourceHelper.path, sourcePlistPath: sourcePlist.path),
+            runner: runner)
+
+        XCTAssertThrowsError(try installer.install()) { error in
+            XCTAssertEqual(error.localizedDescription, "Helper 安装已取消。")
+        }
+    }
+
+    func testDoctorReportsMissingHelperAndUnavailablePmsetInChinese() {
+        let doctor = MacDoctorService(
+            helper: FakeHelperClient(
+                helperPath: "/tmp/vibestick-missing-helper",
+                statusResult: .failure(HelperClientError.helperFailed("helper down"))),
+            battery: FakeBatteryMonitor(),
+            processInspector: FakeProcessInspector(),
+            assertionManager: FakeAssertionManager())
+
+        let report = doctor.run()
+
+        let helper = report.checks.first { $0.name == "helper" }
+        let pmset = report.checks.first { $0.name == "pmset" }
+        XCTAssertEqual(helper?.passed, false)
+        XCTAssertTrue(helper?.message.contains("Helper 未安装") == true)
+        XCTAssertEqual(pmset?.passed, false)
+        XCTAssertTrue(pmset?.message.contains("无法读取 pmset 状态") == true)
+    }
+
+    func testDoctorReportsNilPmsetSnapshotInChinese() {
+        let doctor = MacDoctorService(
+            helper: FakeHelperClient(
+                helperPath: "direct",
+                statusResult: .success(HelperStatus(ok: true, snapshot: nil, backup: nil, statePath: "/tmp/state.json"))),
+            battery: FakeBatteryMonitor(),
+            processInspector: FakeProcessInspector(),
+            assertionManager: FakeAssertionManager())
+
+        let report = doctor.run()
+
+        let pmset = report.checks.first { $0.name == "pmset" }
+        XCTAssertEqual(pmset?.passed, false)
+        XCTAssertEqual(pmset?.message, "无法读取 pmset 快照。")
+    }
+
     func testCoderStatusJsonUsesSnakeCaseCompatibleKeys() throws {
         let directory = temporaryDirectory()
         let writer = CoderStatusWriter(directory: directory)
@@ -166,6 +390,168 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(statuses.count, 1)
         XCTAssertEqual(statuses[0].phase, .toolCalling)
         XCTAssertEqual(statuses[0].taskSummary, "Port Mac")
+    }
+
+    func testCoderStatusIdentityUsesSessionWhenPresent() {
+        XCTAssertEqual(
+            coderStatus(agent: "codex", sessionId: "session-a").identity,
+            "codex:session-a")
+        XCTAssertEqual(
+            coderStatus(agent: "codex", sessionId: nil).identity,
+            "codex")
+    }
+
+    func testCompositeCoderStatusSourcePreservesMultipleSessionsForSameAgent() {
+        let now = Date()
+        let source = CompositeCoderStatusSource([
+            StaticCoderStatusSource(statuses: [
+                coderStatus(
+                    agent: "codex",
+                    phase: .reasoning,
+                    updatedAtUtc: now,
+                    sessionId: "session-a",
+                    taskSummary: "First task"),
+                coderStatus(
+                    agent: "codex",
+                    phase: .toolCalling,
+                    updatedAtUtc: now.addingTimeInterval(1),
+                    sessionId: "session-b",
+                    taskSummary: "Second task")
+            ])
+        ])
+
+        let statuses = source.getStatuses(now: now)
+
+        XCTAssertEqual(statuses.count, 2)
+        XCTAssertEqual(statuses.map(\.sessionId), ["session-b", "session-a"])
+        XCTAssertEqual(statuses.map(\.taskSummary), ["Second task", "First task"])
+    }
+
+    func testCompositeCoderStatusSourceDeduplicatesSameSessionByPriorityAndTimestamp() {
+        let now = Date()
+        let source = CompositeCoderStatusSource([
+            StaticCoderStatusSource(statuses: [
+                coderStatus(
+                    agent: "codex",
+                    phase: .reasoning,
+                    message: "newer reasoning",
+                    updatedAtUtc: now.addingTimeInterval(3),
+                    sessionId: "session-a",
+                    taskSummary: "Reasoning task"),
+                coderStatus(
+                    agent: "codex",
+                    phase: .toolCalling,
+                    message: "older tool",
+                    updatedAtUtc: now.addingTimeInterval(1),
+                    sessionId: "session-a",
+                    taskSummary: "Older tool task"),
+                coderStatus(
+                    agent: "codex",
+                    phase: .toolCalling,
+                    message: "newer tool",
+                    updatedAtUtc: now.addingTimeInterval(2),
+                    sessionId: "session-a",
+                    taskSummary: "Newer tool task")
+            ])
+        ])
+
+        let statuses = source.getStatuses(now: now)
+
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0].sessionId, "session-a")
+        XCTAssertEqual(statuses[0].phase, .toolCalling)
+        XCTAssertEqual(statuses[0].message, "newer tool")
+        XCTAssertEqual(statuses[0].taskSummary, "Newer tool task")
+    }
+
+    func testCodexSessionStatusSourceDetectsActiveToolCall() throws {
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        let timestamp = isoTimestamp(now.addingTimeInterval(-5))
+        let sessionPath = try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now,
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/Users/pzy/Desktop/Vibestick"}}
+            {"type":"event_msg","payload":{"type":"user_message","message":"<environment_context>ignore</environment_context> 请帮我修复 Mac active codex task 探测"}}
+            {"type":"event_msg","payload":{"type":"agent_message","message":"Running focused Mac checks"}}
+            {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"cat secret.txt"}}
+            """)
+        let source = CodexSessionStatusSource(sessionsRoot: sessionsRoot)
+
+        let statuses = source.getStatuses(now: now)
+
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0].agent, "codex")
+        XCTAssertEqual(statuses[0].phase, .toolCalling)
+        XCTAssertEqual(statuses[0].message, "Using shell_command")
+        XCTAssertEqual(statuses[0].workspace, "/Users/pzy/Desktop/Vibestick")
+        XCTAssertEqual(statuses[0].sessionId, "session-a")
+        XCTAssertEqual(statuses[0].taskSummary, "修复 Mac active codex task 探测")
+        XCTAssertEqual(statuses[0].taskDetail, "Running focused Mac checks")
+        XCTAssertEqual(
+            URL(fileURLWithPath: try XCTUnwrap(statuses[0].sourcePath)).standardizedFileURL.path,
+            sessionPath.standardizedFileURL.path)
+        XCTAssertFalse(statuses[0].message?.localizedCaseInsensitiveContains("secret") == true)
+    }
+
+    func testCodexSessionStatusSourceIgnoresExpiredActiveEvent() throws {
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        let timestamp = isoTimestamp(now.addingTimeInterval(-301))
+        try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now,
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/repo"}}
+            {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"reasoning"}}
+            """)
+        let source = CodexSessionStatusSource(sessionsRoot: sessionsRoot)
+
+        XCTAssertEqual(source.getStatuses(now: now), [])
+    }
+
+    func testCodexSessionStatusSourceUsesFileMtimeWhenTimestampIsMissing() throws {
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now.addingTimeInterval(-301),
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/repo"}}
+            {"type":"response_item","payload":{"type":"reasoning"}}
+            """)
+        let source = CodexSessionStatusSource(sessionsRoot: sessionsRoot)
+
+        XCTAssertEqual(source.getStatuses(now: now), [])
+    }
+
+    func testCompositeSourceUsesActiveCodexSessionBeforeSleepingProcessFallback() throws {
+        let directory = temporaryDirectory()
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        let timestamp = isoTimestamp(now)
+        try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now,
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/repo"}}
+            {"type":"event_msg","payload":{"type":"user_message","message":"Implement task cards"}}
+            {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"function_call","name":"shell_command"}}
+            """)
+        let source = CompositeCoderStatusSource([
+            JsonFileCoderStatusSource(directory: directory),
+            CodexSessionStatusSource(sessionsRoot: sessionsRoot),
+            ProcessCoderStatusSource(
+                processInspector: FakeProcessInspector(tasks: [LongTaskProcess(processId: 123, name: "codex")]),
+                processNames: ["codex"])
+        ])
+
+        let statuses = source.getStatuses(now: now)
+
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0].phase, .toolCalling)
+        XCTAssertEqual(statuses[0].taskSummary, "Implement task cards")
     }
 
     private var samplePmset: String {
@@ -206,6 +592,54 @@ final class VibestickMacCoreTests: XCTestCase {
         try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    private func coderStatus(
+        agent: String = "codex",
+        phase: CoderAgentPhase = .reasoning,
+        message: String? = nil,
+        updatedAtUtc: Date = Date(),
+        sessionId: String? = nil,
+        taskSummary: String? = nil
+    ) -> CoderAgentStatus {
+        CoderAgentStatus(
+            agent: agent,
+            phase: phase,
+            message: message,
+            workspace: nil,
+            processId: nil,
+            updatedAtUtc: updatedAtUtc,
+            ttlSeconds: 120,
+            sessionId: sessionId,
+            taskSummary: taskSummary,
+            sourcePath: nil,
+            taskDetail: nil)
+    }
+
+    private func createExecutable(named name: String, in directory: URL) throws -> URL {
+        let url = directory.appendingPathComponent(name)
+        FileManager.default.createFile(atPath: url.path, contents: Data("#!/bin/sh\n".utf8))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    @discardableResult
+    private func writeCodexSession(sessionsRoot: URL, modifiedAt: Date, contents: String) throws -> URL {
+        let sessionDay = sessionsRoot
+            .appendingPathComponent("2026", isDirectory: true)
+            .appendingPathComponent("05", isDirectory: true)
+            .appendingPathComponent("19", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDay, withIntermediateDirectories: true)
+        let path = sessionDay.appendingPathComponent("rollout-2026-05-19T10-00-00-test.jsonl")
+        try contents.appending("\n").write(to: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: path.path)
+        return path
+    }
+
+    private func isoTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
 }
 
 private final class FakeRunner: CommandRunning, @unchecked Sendable {
@@ -213,9 +647,13 @@ private final class FakeRunner: CommandRunning, @unchecked Sendable {
     var capOutput = ""
     var invocations: [[String]] = []
     var forcedResult: CommandResult?
+    var onRun: ((String, [String]) throws -> CommandResult)?
 
     func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
         invocations.append([executable] + arguments)
+        if let onRun {
+            return try onRun(executable, arguments)
+        }
         if let forcedResult {
             return forcedResult
         }
@@ -229,5 +667,76 @@ private final class FakeRunner: CommandRunning, @unchecked Sendable {
             return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         }
         return CommandResult(exitCode: 1, standardOutput: "", standardError: "unexpected command")
+    }
+}
+
+private func extractStagedDirectory(from value: String) -> String? {
+    guard let prefixRange = value.range(of: "/private/tmp/VibestickHelperInstall-") else {
+        return nil
+    }
+    let suffix = value[prefixRange.lowerBound...]
+    guard let slash = suffix.dropFirst("/private/tmp/VibestickHelperInstall-".count).firstIndex(of: "/") else {
+        return String(suffix)
+    }
+    return String(suffix[..<slash])
+}
+
+private final class FakeHelperClient: HelperClienting, @unchecked Sendable {
+    let helperPath: String
+    var statusResult: Result<HelperStatus, Error>
+
+    init(helperPath: String, statusResult: Result<HelperStatus, Error>) {
+        self.helperPath = helperPath
+        self.statusResult = statusResult
+    }
+
+    func status() throws -> HelperStatus {
+        try statusResult.get()
+    }
+
+    func applyOn() throws -> ModeChangeResult {
+        ModeChangeResult(requestedMode: .on, appliedMode: .on, restorePending: true, message: "on")
+    }
+
+    func applyHyper() throws -> ModeChangeResult {
+        ModeChangeResult(requestedMode: .hyper, appliedMode: .hyper, restorePending: true, message: "hyper")
+    }
+
+    func restore() throws -> ModeChangeResult {
+        ModeChangeResult(requestedMode: .off, appliedMode: .off, restorePending: false, message: "off")
+    }
+}
+
+private final class FakeBatteryMonitor: BatteryMonitoring, @unchecked Sendable {
+    func getBatteryInfo() -> BatteryInfo {
+        BatteryInfo(percentage: 80, isACConnected: true, isAvailable: true)
+    }
+}
+
+private final class FakeProcessInspector: ProcessInspecting, @unchecked Sendable {
+    let tasks: [LongTaskProcess]
+
+    init(tasks: [LongTaskProcess] = []) {
+        self.tasks = tasks
+    }
+
+    func getLongTasks(whitelist: [String]) -> [LongTaskProcess] {
+        tasks.filter { task in
+            whitelist.contains { MacProcessInspector.normalize($0) == MacProcessInspector.normalize(task.name) }
+        }
+    }
+}
+
+private final class FakeAssertionManager: SleepAssertionManaging, @unchecked Sendable {
+    func beginHyperAssertion() throws {}
+    func endHyperAssertion() {}
+    func isVibestickAssertionActive() -> Bool { false }
+}
+
+private struct StaticCoderStatusSource: CoderStatusSourcing {
+    let statuses: [CoderAgentStatus]
+
+    func getStatuses(now: Date) -> [CoderAgentStatus] {
+        statuses
     }
 }
