@@ -33,6 +33,9 @@ let coderSource = CompositeCoderStatusSource([
 ])
 let coderWriter = CoderStatusWriter(directory: coderDirectory)
 let petResolver = PetStateResolver()
+let deviceWatcherInstaller = MacDeviceWatcherInstaller(
+    paths: .resolvedDefault(appPath: option("--app-path")),
+    runner: runner)
 
 do {
     let exitCode = try run()
@@ -84,6 +87,9 @@ func run() throws -> Int32 {
 
     case "coder":
         return try runCoder()
+
+    case "device-watcher":
+        return try runDeviceWatcher()
 
     default:
         throw ValidationError("Unknown command '\(command)'.")
@@ -163,6 +169,32 @@ func runCoder() throws -> Int32 {
     }
 }
 
+func runDeviceWatcher() throws -> Int32 {
+    guard args.count >= 2 else {
+        throw ValidationError("Missing device-watcher command. Expected: status, install, uninstall.")
+    }
+
+    switch args[1].lowercased() {
+    case "status":
+        let status = deviceWatcherInstaller.status()
+        json ? writeJSON(status) : printDeviceWatcherStatus(status)
+        return status.isInstalled ? 0 : 2
+
+    case "install":
+        let result = try deviceWatcherInstaller.install()
+        json ? writeJSON(result) : printDeviceWatcherResult(result)
+        return 0
+
+    case "uninstall":
+        let result = try deviceWatcherInstaller.uninstall()
+        json ? writeJSON(result) : printDeviceWatcherResult(result)
+        return 0
+
+    default:
+        throw ValidationError("Unknown device-watcher command '\(args[1])'. Expected: status, install, uninstall.")
+    }
+}
+
 func printStatus(_ status: VibestickStatus) {
     print("Vibestick Mac")
     print("Mode:             \(status.activeMode.rawValue)")
@@ -195,6 +227,26 @@ func printModeResult(_ result: ModeChangeResult) {
     }
 }
 
+func printDeviceWatcherStatus(_ status: DeviceWatcherInstallStatus) {
+    print("Vibestick device watcher")
+    print("Watcher:          \(status.watcherExecutablePath)")
+    print("App:              \(status.appPath)")
+    print("LaunchAgent:      \(status.plistPath)")
+    print("Ready:            \(yesNo(status.isReadyToInstall))")
+    print("Installed:        \(yesNo(status.isInstalled))")
+    print("Watcher exists:   \(yesNo(status.watcherExecutableExists))")
+    print("App exists:       \(yesNo(status.appExists))")
+    print("Plist installed:  \(yesNo(status.plistInstalled))")
+    print("Agent loaded:     \(yesNo(status.launchAgentLoaded))")
+}
+
+func printDeviceWatcherResult(_ result: DeviceWatcherInstallResult) {
+    print(result.message)
+    print("Watcher:     \(result.watcherExecutablePath)")
+    print("App:         \(result.appPath)")
+    print("LaunchAgent: \(result.plistPath)")
+}
+
 func printHelp() {
     print("""
     Vibestick Mac
@@ -207,6 +259,9 @@ func printHelp() {
       vibestickctl pet status [--json] [--status-dir <path>] [--codex-sessions-dir <path>]
       vibestickctl coder emit --phase <phase> [--agent <name>] [--message <text>] [--workspace <path>] [--pid <id>] [--ttl <seconds>] [--session-id <id>] [--summary <text>] [--detail <text>] [--source-path <path>] [--json] [--status-dir <path>]
       vibestickctl coder clear [--agent <name>] [--json] [--status-dir <path>]
+      vibestickctl device-watcher status [--json] [--app-path <path>]
+      vibestickctl device-watcher install [--json] [--app-path <path>]
+      vibestickctl device-watcher uninstall [--json] [--app-path <path>]
     """)
 }
 

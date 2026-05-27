@@ -36,6 +36,7 @@ scripts/install-helper.sh
 - `VibestickMacCore`: parsers, state, `pmset` policy manager, battery, coder status, pet state, doctor checks.
 - `vibestickctl`: Mac CLI mirroring the Windows command surface.
 - `VibestickHelper`: root helper allowlist for `status`, `apply-on`, `apply-hyper`, and `restore`.
+- `VibestickDeviceWatcher`: per-user LaunchAgent companion that watches for the finished RP2040 USB identity and starts or focuses the app.
 - `VibestickApp`: SwiftUI/AppKit control panel, menu bar item, and floating pet.
 
 ## Power Semantics
@@ -73,6 +74,36 @@ Development uninstall:
 
 ```bash
 scripts/uninstall-helper.sh
+```
+
+## Device Auto-Start
+
+The macOS auto-start path uses a per-user LaunchAgent, not USB autorun. The
+watcher detects the finished firmware device `0x2E8A:0x4002` and starts or
+focuses `Vibestick.app`. It treats the RP2040 `RPI-RP2` bootloader volume or
+`0x2E8A:0x0003` identity as setup/flashing state and does not launch the app.
+
+Development install after building the app bundle:
+
+```bash
+scripts/build-release.sh dev
+scripts/install-device-watcher.sh
+```
+
+CLI surface:
+
+```bash
+dist/vibestickctl device-watcher status
+dist/vibestickctl device-watcher install --app-path "$PWD/dist/Vibestick.app"
+dist/vibestickctl device-watcher uninstall
+swift run VibestickDeviceWatcher -- --once --no-launch --log-path artifacts/device-autostart/mac-watcher.log
+```
+
+LaunchAgent plist and logs:
+
+```text
+~/Library/LaunchAgents/com.pzy.vibestick.device-watcher.plist
+~/Library/Logs/Vibestick/device-watcher.log
 ```
 
 ## Release

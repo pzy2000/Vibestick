@@ -18,6 +18,7 @@ mkdir -p "$app/Contents/MacOS" \
 
 cp "$macos_root/packaging/AppBundle/Info.plist" "$app/Contents/Info.plist"
 cp "$macos_root/.build/release/VibestickApp" "$app/Contents/MacOS/VibestickApp"
+cp "$macos_root/.build/release/VibestickDeviceWatcher" "$app/Contents/MacOS/VibestickDeviceWatcher"
 cp "$macos_root/.build/release/vibestickctl" "$dist/vibestickctl"
 cp "$macos_root/.build/release/VibestickHelper" "$app/Contents/Library/PrivilegedHelperTools/com.pzy.vibestick.helper"
 cp "$macos_root/packaging/LaunchDaemons/com.pzy.vibestick.helper.plist" "$app/Contents/Library/LaunchDaemons/com.pzy.vibestick.helper.plist"

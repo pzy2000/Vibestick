@@ -174,6 +174,31 @@ dotnet run --project tests\Vibestick.Tests: All 39 tests passed
   - Agent launches or focuses the Vibestick macOS app when the final firmware device appears.
   - Agent ignores the `RPI-RP2` bootloader except to surface setup/flashing status if the UI wants that later.
 
+## macOS Implementation Notes
+
+- SwiftPM product: `VibestickDeviceWatcher`.
+- User LaunchAgent label: `com.pzy.vibestick.device-watcher`.
+- User LaunchAgent path:
+
+```text
+~/Library/LaunchAgents/com.pzy.vibestick.device-watcher.plist
+```
+
+- Default log path:
+
+```text
+~/Library/Logs/Vibestick/device-watcher.log
+```
+
+- CLI surface:
+
+```bash
+dist/vibestickctl device-watcher status
+dist/vibestickctl device-watcher install --app-path "$PWD/dist/Vibestick.app"
+dist/vibestickctl device-watcher uninstall
+swift run VibestickDeviceWatcher -- --once --no-launch --log-path artifacts/device-autostart/mac-watcher.log
+```
+
 ## Acceptance Notes
 
 - This markdown is documentation only. It should not be read as evidence that the repository working tree is clean.

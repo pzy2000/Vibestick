@@ -122,11 +122,15 @@ final class VibestickViewModel: ObservableObject {
     @Published var petCoders: [CoderAgentStatus] = []
     @Published var helperInstallMessage = ""
     @Published var isInstallingHelper = false
+    @Published var deviceWatcherStatusText = "正在读取插盘自启状态..."
+    @Published var deviceWatcherMessage = ""
+    @Published var isInstallingDeviceWatcher = false
 
     private let assertionManager: MacSleepAssertionManager
     private let engine: VibestickMacEngine
     private let doctor: MacDoctorService
     private let helperInstaller: HelperInstalling
+    private let deviceWatcherInstaller: DeviceWatcherInstalling
     private let coderSource: CompositeCoderStatusSource
     private let petResolver = PetStateResolver()
     private var refreshTimer: Timer?
@@ -139,6 +143,7 @@ final class VibestickViewModel: ObservableObject {
         let assertionManager = MacSleepAssertionManager()
         self.assertionManager = assertionManager
         self.helperInstaller = MacHelperInstaller()
+        self.deviceWatcherInstaller = MacDeviceWatcherInstaller()
         self.engine = VibestickMacEngine(
             helper: helper,
             battery: battery,
@@ -168,11 +173,13 @@ final class VibestickViewModel: ObservableObject {
 
         let engine = engine
         let helperInstaller = helperInstaller
+        let deviceWatcherInstaller = deviceWatcherInstaller
         let coderSource = coderSource
         let petResolver = petResolver
         refreshTask = Task.detached(priority: .utility) { [weak self] in
             let status = engine.status()
             let helperPreflight = helperInstaller.preflight()
+            let deviceWatcherStatus = deviceWatcherInstaller.status()
             let coders = coderSource.getStatuses(now: Date())
             let pet = petResolver.resolve(status: status, coders: coders)
 
@@ -180,6 +187,7 @@ final class VibestickViewModel: ObservableObject {
                 self?.finishRefresh(
                     status: status,
                     helperPreflight: helperPreflight,
+                    deviceWatcherStatus: deviceWatcherStatus,
                     coders: coders,
                     pet: pet)
             }
@@ -189,11 +197,13 @@ final class VibestickViewModel: ObservableObject {
     private func finishRefresh(
         status: VibestickStatus,
         helperPreflight: HelperInstallPreflight,
+        deviceWatcherStatus: DeviceWatcherInstallStatus,
         coders: [CoderAgentStatus],
         pet: PetState)
     {
         refreshTask = nil
         statusText = formatStatus(status, helperPreflight: helperPreflight)
+        deviceWatcherStatusText = formatDeviceWatcherStatus(deviceWatcherStatus)
         petMood = pet.mood
         petTitle = pet.title
         petMessage = pet.message
@@ -256,6 +266,54 @@ final class VibestickViewModel: ObservableObject {
         }
     }
 
+    func installDeviceWatcher() {
+        guard !isInstallingDeviceWatcher else {
+            return
+        }
+
+        isInstallingDeviceWatcher = true
+        deviceWatcherMessage = "正在安装插盘自启 LaunchAgent..."
+        let installer = deviceWatcherInstaller
+
+        Task.detached {
+            let result = Result { try installer.install() }
+            await MainActor.run {
+                self.isInstallingDeviceWatcher = false
+                switch result {
+                case .success(let installResult):
+                    self.deviceWatcherMessage = installResult.message
+                case .failure(let error):
+                    self.deviceWatcherMessage = error.localizedDescription
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    func uninstallDeviceWatcher() {
+        guard !isInstallingDeviceWatcher else {
+            return
+        }
+
+        isInstallingDeviceWatcher = true
+        deviceWatcherMessage = "正在卸载插盘自启 LaunchAgent..."
+        let installer = deviceWatcherInstaller
+
+        Task.detached {
+            let result = Result { try installer.uninstall() }
+            await MainActor.run {
+                self.isInstallingDeviceWatcher = false
+                switch result {
+                case .success(let uninstallResult):
+                    self.deviceWatcherMessage = uninstallResult.message
+                case .failure(let error):
+                    self.deviceWatcherMessage = error.localizedDescription
+                }
+                self.refresh()
+            }
+        }
+    }
+
     private func formatStatus(_ status: VibestickStatus, helperPreflight: HelperInstallPreflight) -> String {
         var lines = [
             "当前模式：\(displayMode(status.activeMode))",
@@ -301,6 +359,22 @@ final class VibestickViewModel: ObservableObject {
             return "未安装，可点击“安装 Helper”"
         }
         return "安装资源缺失，请先重新构建 macOS app"
+    }
+
+    private func formatDeviceWatcherStatus(_ status: DeviceWatcherInstallStatus) -> String {
+        if status.isInstalled {
+            return "已启用：插入 Vibestick RP2040 会启动或聚焦 app。"
+        }
+        if status.isReadyToInstall {
+            return "未启用：可安装当前 app 的用户级 LaunchAgent。"
+        }
+        if !status.watcherExecutableExists {
+            return "不可安装：找不到 VibestickDeviceWatcher，请先重新构建 app。"
+        }
+        if !status.appExists {
+            return "不可安装：找不到 Vibestick.app，请先构建或安装 app。"
+        }
+        return "未启用。"
     }
 
     private func displayMode(_ mode: VibestickMode) -> String {
@@ -363,6 +437,26 @@ struct ControlPanelView: View {
             if !viewModel.helperInstallMessage.isEmpty {
                 Text(viewModel.helperInstallMessage)
                     .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("插盘自启：\(viewModel.deviceWatcherStatusText)")
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack {
+                    Button(viewModel.isInstallingDeviceWatcher ? "处理中..." : "启用插盘自启") {
+                        viewModel.installDeviceWatcher()
+                    }
+                    .disabled(viewModel.isInstallingDeviceWatcher)
+                    Button("关闭插盘自启") {
+                        viewModel.uninstallDeviceWatcher()
+                    }
+                    .disabled(viewModel.isInstallingDeviceWatcher)
+                }
+                if !viewModel.deviceWatcherMessage.isEmpty {
+                    Text(viewModel.deviceWatcherMessage)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             ScrollView {

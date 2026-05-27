@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "VibestickMacCore", targets: ["VibestickMacCore"]),
         .executable(name: "vibestickctl", targets: ["vibestickctl"]),
         .executable(name: "VibestickHelper", targets: ["VibestickHelper"]),
+        .executable(name: "VibestickDeviceWatcher", targets: ["VibestickDeviceWatcher"]),
         .executable(name: "VibestickApp", targets: ["VibestickApp"])
     ],
     targets: [
@@ -27,6 +28,12 @@ let package = Package(
         .executableTarget(
             name: "VibestickHelper",
             dependencies: ["VibestickMacCore"]),
+        .executableTarget(
+            name: "VibestickDeviceWatcher",
+            dependencies: ["VibestickMacCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit")
+            ]),
         .executableTarget(
             name: "VibestickApp",
             dependencies: ["VibestickMacCore"],

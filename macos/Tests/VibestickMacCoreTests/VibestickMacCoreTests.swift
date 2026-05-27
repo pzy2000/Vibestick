@@ -554,6 +554,132 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(statuses[0].taskSummary, "Implement task cards")
     }
 
+    func testDeviceDetectorLaunchesForFinalVibestickFirmware() {
+        let detection = DeviceDetector.detect([
+            DeviceSnapshot(instanceId: "USB\\VID_2E8A&PID_4002\\VS-RP2040-0002")
+        ])
+        let policy = DeviceAutoLaunchPolicy(debounce: 5)
+
+        let decision = policy.evaluate(detection: detection, isGuiAlreadyRunning: false, now: Date(timeIntervalSince1970: 100))
+
+        XCTAssertEqual(detection.kind, .vibestickDevice)
+        XCTAssertEqual(decision.action, .launch)
+    }
+
+    func testDeviceDetectorTreatsBootloaderIdentityAsBootloaderOnly() {
+        let detection = DeviceDetector.detect([
+            DeviceSnapshot(instanceId: "USB\\VID_2E8A&PID_0003")
+        ])
+        let policy = DeviceAutoLaunchPolicy(debounce: 5)
+
+        let decision = policy.evaluate(detection: detection, isGuiAlreadyRunning: false, now: Date())
+
+        XCTAssertEqual(detection.kind, .bootloader)
+        XCTAssertEqual(decision.action, .bootloaderOnly)
+    }
+
+    func testDeviceDetectorTreatsRpiRp2VolumeAsBootloaderOnly() throws {
+        let volumesRoot = temporaryDirectory()
+        let bootloader = volumesRoot.appendingPathComponent("RPI-RP2", isDirectory: true)
+        try FileManager.default.createDirectory(at: bootloader, withIntermediateDirectories: true)
+        try "Board-ID: RPI-RP2\n".write(
+            to: bootloader.appendingPathComponent("INFO_UF2.TXT"),
+            atomically: true,
+            encoding: .utf8)
+        let source = MacUSBDeviceSnapshotSource(volumesRoot: volumesRoot, includeUSBDevices: false)
+
+        let detection = DeviceDetector.detect(source.getSnapshots())
+
+        XCTAssertEqual(detection.kind, .bootloader)
+    }
+
+    func testDeviceAutoLaunchPolicyReportsAlreadyRunningAndDebouncesRepeatedLaunches() {
+        let detection = DeviceDetector.detect([
+            DeviceSnapshot(vendorId: 0x2E8A, productId: 0x4002)
+        ])
+        let policy = DeviceAutoLaunchPolicy(debounce: 5)
+        let now = Date(timeIntervalSince1970: 100)
+
+        XCTAssertEqual(
+            policy.evaluate(detection: detection, isGuiAlreadyRunning: true, now: now).action,
+            .alreadyRunning)
+        XCTAssertEqual(
+            policy.evaluate(detection: detection, isGuiAlreadyRunning: false, now: now).action,
+            .launch)
+        XCTAssertEqual(
+            policy.evaluate(detection: detection, isGuiAlreadyRunning: false, now: now.addingTimeInterval(2)).action,
+            .debounced)
+    }
+
+    func testDeviceWatcherInstallerBuildsPerUserLaunchAgentWithoutSudo() throws {
+        let directory = temporaryDirectory()
+        let watcher = try createExecutable(named: "VibestickDeviceWatcher", in: directory)
+        let app = directory.appendingPathComponent("Vibestick.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let plist = directory.appendingPathComponent("com.pzy.vibestick.device-watcher.plist")
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        let installer = MacDeviceWatcherInstaller(
+            paths: DeviceWatcherInstallPaths(
+                watcherExecutablePath: watcher.path,
+                appPath: app.path,
+                plistPath: plist.path,
+                logPath: directory.appendingPathComponent("watcher.log").path,
+                errorLogPath: directory.appendingPathComponent("watcher.err").path),
+            runner: runner,
+            userId: 501)
+
+        let result = try installer.install()
+
+        XCTAssertEqual(result.plistPath, plist.path)
+        let data = try Data(contentsOf: plist)
+        let plistObject = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        XCTAssertEqual(plistObject["Label"] as? String, "com.pzy.vibestick.device-watcher")
+        XCTAssertEqual(plistObject["ProgramArguments"] as? [String], [watcher.path, "--app-path", app.path])
+        XCTAssertEqual(plistObject["RunAtLoad"] as? Bool, true)
+        XCTAssertEqual(plistObject["KeepAlive"] as? Bool, true)
+        XCTAssertTrue(runner.invocations.contains(["/bin/launchctl", "bootstrap", "gui/501", plist.path]))
+        XCTAssertTrue(runner.invocations.contains(["/bin/launchctl", "enable", "gui/501/com.pzy.vibestick.device-watcher"]))
+        XCTAssertFalse(runner.invocations.contains { $0.contains("sudo") })
+    }
+
+    func testDeviceWatcherDefaultPathsPreferWatcherInsideConfiguredAppBundle() throws {
+        let directory = temporaryDirectory()
+        let appMacOS = directory
+            .appendingPathComponent("Vibestick.app", isDirectory: true)
+            .appendingPathComponent("Contents/MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: appMacOS, withIntermediateDirectories: true)
+        let watcher = try createExecutable(named: "VibestickDeviceWatcher", in: appMacOS)
+
+        let paths = DeviceWatcherInstallPaths.resolvedDefault(
+            appPath: directory.appendingPathComponent("Vibestick.app").path)
+
+        XCTAssertEqual(paths.watcherExecutablePath, watcher.path)
+    }
+
+    func testVibestickAppLauncherFocusesRunningAppAndOpensMissingProcess() throws {
+        let directory = temporaryDirectory()
+        let app = directory.appendingPathComponent("Vibestick.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let runningController = FakeApplicationController(isRunning: true)
+        let runningLauncher = VibestickAppLauncher(appPath: app.path, controller: runningController)
+
+        let focusResult = runningLauncher.launchOrFocus()
+
+        XCTAssertEqual(focusResult.action, .focused)
+        XCTAssertEqual(runningController.openedApps, [])
+        XCTAssertEqual(runningController.activatedBundleIdentifiers, [VibestickPaths.bundleIdentifier])
+
+        let stoppedController = FakeApplicationController(isRunning: false)
+        let stoppedLauncher = VibestickAppLauncher(appPath: app.path, controller: stoppedController)
+
+        let openResult = stoppedLauncher.launchOrFocus()
+
+        XCTAssertEqual(openResult.action, .opened)
+        XCTAssertEqual(stoppedController.openedApps, [app.path])
+        XCTAssertEqual(stoppedController.openedArguments, [["--device-auto-start"]])
+    }
+
     private var samplePmset: String {
         """
         Battery Power:
@@ -667,6 +793,31 @@ private final class FakeRunner: CommandRunning, @unchecked Sendable {
             return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         }
         return CommandResult(exitCode: 1, standardOutput: "", standardError: "unexpected command")
+    }
+}
+
+private final class FakeApplicationController: MacApplicationControlling, @unchecked Sendable {
+    var isRunning: Bool
+    var activatedBundleIdentifiers: [String] = []
+    var openedApps: [String] = []
+    var openedArguments: [[String]] = []
+
+    init(isRunning: Bool) {
+        self.isRunning = isRunning
+    }
+
+    func isApplicationRunning(bundleIdentifier: String) -> Bool {
+        isRunning
+    }
+
+    func activateApplication(bundleIdentifier: String) -> Bool {
+        activatedBundleIdentifiers.append(bundleIdentifier)
+        return true
+    }
+
+    func openApplication(at appPath: String, arguments: [String]) throws {
+        openedApps.append(appPath)
+        openedArguments.append(arguments)
     }
 }
 

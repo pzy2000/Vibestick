@@ -35,6 +35,7 @@ scripts/install-helper.sh
 - `VibestickMacCore`：解析器、状态、`pmset` 策略管理、电池、coder 状态、宠物状态和 doctor 检查。
 - `vibestickctl`：Mac CLI，对齐 Windows 命令表面。
 - `VibestickHelper`：root helper allowlist，只允许 `status`、`apply-on`、`apply-hyper` 和 `restore`。
+- `VibestickDeviceWatcher`：用户级 LaunchAgent companion，监听最终 RP2040 USB 设备并启动或聚焦 app。
 - `VibestickApp`：SwiftUI/AppKit 控制面板、菜单栏项和浮动宠物。
 
 ## 电源语义
@@ -70,6 +71,35 @@ scripts/install-helper.sh
 
 ```bash
 scripts/uninstall-helper.sh
+```
+
+## 插盘自启
+
+macOS 插盘自启使用用户级 LaunchAgent，不依赖 USB autorun。watcher 检测最终固件设备
+`0x2E8A:0x4002` 后启动或聚焦 `Vibestick.app`；检测到 RP2040 `RPI-RP2`
+bootloader 卷或 `0x2E8A:0x0003` 时只作为刷机/设置状态处理，不启动 app。
+
+构建 app bundle 后开发安装：
+
+```bash
+scripts/build-release.sh dev
+scripts/install-device-watcher.sh
+```
+
+CLI：
+
+```bash
+dist/vibestickctl device-watcher status
+dist/vibestickctl device-watcher install --app-path "$PWD/dist/Vibestick.app"
+dist/vibestickctl device-watcher uninstall
+swift run VibestickDeviceWatcher -- --once --no-launch --log-path artifacts/device-autostart/mac-watcher.log
+```
+
+LaunchAgent plist 和日志：
+
+```text
+~/Library/LaunchAgents/com.pzy.vibestick.device-watcher.plist
+~/Library/Logs/Vibestick/device-watcher.log
 ```
 
 ## 发布
