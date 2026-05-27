@@ -71,7 +71,7 @@ Vibestick 默认随宠物启动本地 Codex 状态桥。桥接器会监听 `%USE
 .\scripts\vibestick-gui.ps1 --no-codex-monitor
 ```
 
-当没有 adapter 状态时，Vibestick 会回退到白名单进程检测，例如 Codex、Claude、Docker 等长时间运行的 coder 任务。
+当没有 adapter 状态时，Vibestick 会回退到白名单进程检测，例如 Codex、Claude Code、OpenCode、OpenClaw、Hermes、Nanobot、Docker 等长时间运行的 coder 任务。
 
 手动 adapter 命令仍可用于测试和非 Codex 集成：
 

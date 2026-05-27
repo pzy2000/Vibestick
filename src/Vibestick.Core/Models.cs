@@ -70,7 +70,13 @@ public sealed class VibestickOptions
         "npm",
         "pnpm",
         "claude",
+        "claude-code",
         "codex",
+        "hermes",
+        "nanobot",
+        "openclaw",
+        "openclaw-cli",
+        "openclaw-doctor",
         "opencode",
         "openhands"
     };

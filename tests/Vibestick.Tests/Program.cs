@@ -17,6 +17,10 @@ internal static class Program
             ("HYPER downgrades to ON below battery downgrade threshold", TestHyperDowngradesOnLowBatteryAsync),
             ("HYPER restores normal sleep below critical battery threshold", TestHyperRestoresOnCriticalBatteryAsync),
             ("Long task detector matches normalized process names", TestLongTaskDetectorAsync),
+            ("Long task detector recognizes known CLI command lines", TestLongTaskCommandLineDetectorAsync),
+            ("Device detector prefers Vibestick firmware over RP2 bootloader", TestDeviceDetectorPrefersFirmwareAsync),
+            ("Device detector recognizes RP2 bootloader volume", TestDeviceDetectorBootloaderAsync),
+            ("Device auto-launch policy debounces duplicate launches", TestDeviceAutoLaunchPolicyAsync),
             ("Json state store recovers from corrupted state", TestCorruptedStateRecoveryAsync),
             ("Coder status adapter parses tool_calling and ignores stale entries", TestCoderStatusAdapterAsync),
             ("Codex session event mapper emits safe pet statuses", TestCodexSessionEventMapperAsync),
@@ -174,10 +178,128 @@ internal static class Program
     {
         var options = new VibestickOptions();
         var matches = LongTaskDetector.FindMatches(
-            new[] { "node.exe", "explorer", "PYTHON", "python3", "docker.exe", "notepad", "codex", "claude.exe" },
+            new[] { "node.exe", "explorer", "PYTHON", "python3", "docker.exe", "notepad", "codex", "claude.exe", "opencode", "openclaw-cli" },
             options.LongTaskProcessNames);
 
-        AssertSequence(new[] { "claude", "codex", "docker" }, matches);
+        AssertSequence(new[] { "claude", "codex", "docker", "openclaw-cli", "opencode" }, matches);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestLongTaskCommandLineDetectorAsync()
+    {
+        var options = new VibestickOptions();
+
+        AssertFalse(LongTaskDetector.TryMatchCommandLine(
+            "node.exe",
+            """node.exe C:\repo\scripts\build.js""",
+            options.LongTaskProcessNames,
+            out _));
+        AssertFalse(LongTaskDetector.TryMatchCommandLine(
+            "python.exe",
+            """python.exe C:\repo\tools\lint.py""",
+            options.LongTaskProcessNames,
+            out _));
+
+        AssertTrue(LongTaskDetector.TryMatchCommandLine(
+            "node.exe",
+            """node.exe C:\Users\ROG\AppData\Roaming\npm\node_modules\openclaw\openclaw.mjs""",
+            options.LongTaskProcessNames,
+            out var openclaw));
+        AssertEqual("openclaw", openclaw);
+
+        AssertTrue(LongTaskDetector.TryMatchCommandLine(
+            "node.exe",
+            """node.exe C:\Users\ROG\AppData\Roaming\npm\node_modules\openclaw-cli\dist\index.js""",
+            options.LongTaskProcessNames,
+            out var openclawCli));
+        AssertEqual("openclaw-cli", openclawCli);
+
+        AssertTrue(LongTaskDetector.TryMatchCommandLine(
+            "node.exe",
+            """node.exe C:\Users\ROG\AppData\Roaming\npm\node_modules\hermes\bin\hermes""",
+            options.LongTaskProcessNames,
+            out var hermes));
+        AssertEqual("hermes", hermes);
+
+        AssertTrue(LongTaskDetector.TryMatchCommandLine(
+            "node.exe",
+            """node.exe C:\Users\ROG\AppData\Roaming\npm\node_modules\nanobot\index.js""",
+            options.LongTaskProcessNames,
+            out var nanobot));
+        AssertEqual("nanobot", nanobot);
+
+        AssertTrue(LongTaskDetector.TryMatchCommandLine(
+            "npm.cmd",
+            """npm exec --package=@anthropic-ai/claude-code -- claude""",
+            options.LongTaskProcessNames,
+            out var claude));
+        AssertEqual("claude", claude);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestDeviceDetectorPrefersFirmwareAsync()
+    {
+        var options = VibestickDeviceOptions.Default;
+        var result = DeviceDetector.Detect(
+            new[]
+            {
+                new DeviceSnapshot(
+                    InstanceId: "USB\\VID_2E8A&PID_0003&MI_01\\boot",
+                    FriendlyName: "RP2 Boot"),
+                new DeviceSnapshot(
+                    DriveRoot: "E:\\",
+                    VolumeLabel: "RPI-RP2",
+                    BoardInfoText: "UF2 Bootloader v3.0\nBoard-ID: RPI-RP2"),
+                new DeviceSnapshot(
+                    InterfaceGuid: options.Device.InterfaceGuid,
+                    FriendlyName: "Vibestick RP2040")
+            },
+            options);
+
+        AssertEqual(DeviceDetectionKind.VibestickDevice, result.Kind);
+        AssertEqual(options.Device, result.MatchedIdentity);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestDeviceDetectorBootloaderAsync()
+    {
+        var result = DeviceDetector.Detect(
+            new[]
+            {
+                new DeviceSnapshot(
+                    DriveRoot: "E:\\",
+                    VolumeLabel: "RPI-RP2",
+                    BoardInfoText: "UF2 Bootloader v3.0\nModel: Raspberry Pi RP2\nBoard-ID: RPI-RP2")
+            });
+
+        AssertEqual(DeviceDetectionKind.Bootloader, result.Kind);
+        AssertEqual("Raspberry Pi RP2 UF2 Bootloader", result.MatchedIdentity?.Name);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestDeviceAutoLaunchPolicyAsync()
+    {
+        var options = VibestickDeviceOptions.Default;
+        var policy = new DeviceAutoLaunchPolicy(options.LaunchDebounce);
+        var now = DateTimeOffset.Parse("2026-05-27T05:00:00Z");
+        var detection = new DeviceDetectionResult(
+            DeviceDetectionKind.VibestickDevice,
+            "Detected Vibestick.",
+            options.Device,
+            new DeviceSnapshot(InstanceId: "USB\\VID_2E8A&PID_4002\\vibestick"));
+
+        var first = policy.Evaluate(detection, isGuiAlreadyRunning: false, now);
+        var duplicate = policy.Evaluate(detection, isGuiAlreadyRunning: false, now.AddSeconds(1));
+        var running = policy.Evaluate(detection, isGuiAlreadyRunning: true, now.AddSeconds(10));
+        var bootloader = policy.Evaluate(
+            new DeviceDetectionResult(DeviceDetectionKind.Bootloader, "Bootloader", options.Bootloader),
+            isGuiAlreadyRunning: false,
+            now.AddSeconds(20));
+
+        AssertEqual(DeviceAutoLaunchAction.Launch, first.Action);
+        AssertEqual(DeviceAutoLaunchAction.Debounced, duplicate.Action);
+        AssertEqual(DeviceAutoLaunchAction.AlreadyRunning, running.Action);
+        AssertEqual(DeviceAutoLaunchAction.BootloaderOnly, bootloader.Action);
         return Task.CompletedTask;
     }
 

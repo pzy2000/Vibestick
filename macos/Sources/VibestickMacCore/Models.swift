@@ -189,7 +189,8 @@ public struct VibestickOptions: Sendable {
     public init(
         longTaskProcessNames: [String] = [
             "cargo", "go", "pytest", "docker", "uv", "npm", "pnpm",
-            "claude", "codex", "opencode", "openhands"
+            "claude", "claude-code", "codex", "hermes", "nanobot",
+            "openclaw", "openclaw-cli", "openclaw-doctor", "opencode", "openhands"
         ],
         hyperGuardIntervalSeconds: UInt64 = 30
     ) {
