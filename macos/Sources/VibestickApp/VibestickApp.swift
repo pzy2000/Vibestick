@@ -898,11 +898,15 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var displayLink: MacPetDisplayLink?
     private var pauseUntil: Date?
     private var lastTick: Date?
+    private var nextWanderAt: Date?
     private var direction: MacPetCrawlDirection = .left
+    private var currentWalkSpeed = PetPanel.randomWalkSpeed()
+    private var crawlAnimationSuppressed = false
     private var walkingEnabled = PetPanel.loadWalkingEnabled()
     private var spriteHovering = false
     private var retainedScreenIdentifier = PetPanel.loadSavedScreenIdentifier()
-    private let walkSpeed: CGFloat = 56
+    private static let minimumWalkableWidth: CGFloat = 8
+    private static let edgeTolerance: CGFloat = 2
     private let bottomMargin: CGFloat = 16
 
     init(
@@ -1059,6 +1063,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private func updateWalkPosition(at now: Date) {
         guard walkingEnabled else {
             pauseUntil = nil
+            nextWanderAt = nil
+            crawlAnimationSuppressed = false
             lastTick = now
             return
         }
@@ -1077,19 +1083,33 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
         var next = frame
         next.origin.y = screen.visibleFrame.minY + bottomMargin
-        let delta = walkSpeed * elapsed * (direction == .right ? 1 : -1)
+
+        let bounds = walkBounds(for: screen, frameWidth: next.width)
+        let walkableWidth = bounds.maxX - bounds.minX
+        guard walkableWidth >= Self.minimumWalkableWidth else {
+            next.origin.x = min(max(next.origin.x, bounds.minX), bounds.maxX)
+            setFrameOrigin(next.origin)
+            crawlAnimationSuppressed = true
+            nextWanderAt = nil
+            return
+        }
+
+        crawlAnimationSuppressed = false
+        let delta = currentWalkSpeed * elapsed * (direction == .right ? 1 : -1)
         next.origin.x += delta
 
-        let minX = screen.visibleFrame.minX
-        let maxX = screen.visibleFrame.maxX - frame.width
-        if next.origin.x <= minX {
-            next.origin.x = minX
+        if next.origin.x <= bounds.minX {
+            next.origin.x = bounds.minX
             direction = .right
-            pauseUntil = now.addingTimeInterval(1)
-        } else if next.origin.x >= maxX {
-            next.origin.x = maxX
+            startNewWalkSegment(at: now)
+            pauseUntil = now.addingTimeInterval(Self.randomEdgePause())
+        } else if next.origin.x >= bounds.maxX {
+            next.origin.x = bounds.maxX
             direction = .left
-            pauseUntil = now.addingTimeInterval(1)
+            startNewWalkSegment(at: now)
+            pauseUntil = now.addingTimeInterval(Self.randomEdgePause())
+        } else if shouldApplyWander(at: now, originX: next.origin.x, bounds: bounds) {
+            applyWander(at: now)
         }
 
         setFrameOrigin(next.origin)
@@ -1099,6 +1119,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         pauseUntil = nil
         lastTick = nil
         alignToWalkLane(resetDirection: true)
+        startNewWalkSegment(at: Date())
     }
 
     private func beginManualDrag() {
@@ -1127,28 +1148,94 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         }
         var next = frame
         next.origin.y = screen.visibleFrame.minY + bottomMargin
-        let minX = screen.visibleFrame.minX
-        let maxX = max(minX, screen.visibleFrame.maxX - next.width)
-        next.origin.x = min(max(next.origin.x, minX), maxX)
+        let bounds = walkBounds(for: screen, frameWidth: next.width)
+        next.origin.x = min(max(next.origin.x, bounds.minX), bounds.maxX)
         setFrameOrigin(next.origin)
         retainedScreenIdentifier = Self.screenIdentifier(for: screen)
+        crawlAnimationSuppressed = bounds.maxX - bounds.minX < Self.minimumWalkableWidth
         if resetDirection {
             direction = crawlDirection(for: next.origin.x, on: screen)
         }
     }
 
     private func crawlDirection(for originX: CGFloat, on screen: NSScreen) -> MacPetCrawlDirection {
-        let minX = screen.visibleFrame.minX
-        let maxX = max(minX, screen.visibleFrame.maxX - frame.width)
-        let tolerance: CGFloat = 2
-        if originX <= minX + tolerance {
+        let bounds = walkBounds(for: screen, frameWidth: frame.width)
+        if originX <= bounds.minX + Self.edgeTolerance {
             return .right
         }
-        if originX >= maxX - tolerance {
+        if originX >= bounds.maxX - Self.edgeTolerance {
             return .left
         }
-        let midpoint = minX + ((maxX - minX) / 2)
-        return originX < midpoint ? .right : .left
+        return Bool.random() ? .right : .left
+    }
+
+    private func walkBounds(for screen: NSScreen, frameWidth: CGFloat) -> (minX: CGFloat, maxX: CGFloat) {
+        let minX = screen.visibleFrame.minX
+        return (minX, max(minX, screen.visibleFrame.maxX - frameWidth))
+    }
+
+    private func startNewWalkSegment(at now: Date) {
+        currentWalkSpeed = Self.randomWalkSpeed()
+        nextWanderAt = now.addingTimeInterval(Self.randomWanderInterval())
+    }
+
+    private func shouldApplyWander(
+        at now: Date,
+        originX: CGFloat,
+        bounds: (minX: CGFloat, maxX: CGFloat)
+    ) -> Bool {
+        guard let nextWanderAt, now >= nextWanderAt else {
+            return false
+        }
+
+        let width = bounds.maxX - bounds.minX
+        guard width >= 160 else {
+            self.nextWanderAt = now.addingTimeInterval(Self.randomWanderInterval())
+            return false
+        }
+
+        let margin = min(max(width * 0.15, 48), width / 2)
+        guard originX > bounds.minX + margin, originX < bounds.maxX - margin else {
+            self.nextWanderAt = now.addingTimeInterval(Self.randomWanderInterval())
+            return false
+        }
+
+        return true
+    }
+
+    private func applyWander(at now: Date) {
+        if Double.random(in: 0..<1) < 0.45 {
+            direction = reversed(direction)
+        }
+        startNewWalkSegment(at: now)
+        if Double.random(in: 0..<1) < 0.55 {
+            pauseUntil = now.addingTimeInterval(Self.randomWanderPause())
+        }
+    }
+
+    private func reversed(_ direction: MacPetCrawlDirection) -> MacPetCrawlDirection {
+        switch direction {
+        case .left:
+            return .right
+        case .right:
+            return .left
+        }
+    }
+
+    private static func randomWalkSpeed() -> CGFloat {
+        CGFloat(Double.random(in: 42...72))
+    }
+
+    private static func randomEdgePause() -> TimeInterval {
+        Double.random(in: 0.6...1.8)
+    }
+
+    private static func randomWanderInterval() -> TimeInterval {
+        Double.random(in: 6...14)
+    }
+
+    private static func randomWanderPause() -> TimeInterval {
+        Double.random(in: 0.35...1.1)
     }
 
     private func clampCurrentPosition() {
@@ -1398,7 +1485,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
-        guard walkingEnabled, !spriteHovering else {
+        guard walkingEnabled, !spriteHovering, !crawlAnimationSuppressed else {
             return nil
         }
         if let pauseUntil, pauseUntil > now {

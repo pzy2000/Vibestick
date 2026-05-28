@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-dotnet:
+    name: Windows .NET
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore Vibestick.sln
+
+      - name: Build
+        run: dotnet build Vibestick.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet run --project tests/Vibestick.Tests/Vibestick.Tests.csproj --configuration Release --no-build
+
+  macos-swift:
+    name: macOS Swift
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Swift Version
+        run: swift --version
+
+      - name: Build
+        working-directory: macos
+        run: swift build
+
+      - name: Test
+        working-directory: macos
+        run: swift test
+
+      - name: Build Development App Bundle
+        run: macos/scripts/build-release.sh dev
+
+      - name: Upload macOS App Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vibestick-macOS-dev-app
+          path: macos/dist/Vibestick.app
+          if-no-files-found: error
+
+      - name: Upload macOS CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibestickctl-macOS
+          path: macos/dist/vibestickctl
+          if-no-files-found: error
