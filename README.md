@@ -13,14 +13,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pzy2000/Vibestick/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/pzy2000/Vibestick/ci.yml?branch=main&label=CI"></a>
-  <a href="https://github.com/pzy2000/Vibestick/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/pzy2000/Vibestick?style=flat"></a>
-  <a href="https://github.com/pzy2000/Vibestick/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/pzy2000/Vibestick?include_prereleases"></a>
-  <a href="https://github.com/pzy2000/Vibestick/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/pzy2000/Vibestick/total"></a>
+  <a href="https://github.com/pzy2000/Vibestick/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF"></a>
+  <a href="https://github.com/pzy2000/Vibestick"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-pzy2000%2FVibestick-181717"></a>
+  <img alt="Release" src="https://img.shields.io/badge/release-dev%20preview-FF8A00">
+  <img alt="Artifacts" src="https://img.shields.io/badge/downloads-CI%20artifacts-2EA44F">
   <img alt=".NET" src="https://img.shields.io/badge/.NET-8.0-512BD4">
   <img alt="Swift" src="https://img.shields.io/badge/Swift-6.0-F05138">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS-0A7EA4">
-  <img alt="License" src="https://img.shields.io/github/license/pzy2000/Vibestick">
+  <img alt="License" src="https://img.shields.io/badge/license-TBD-lightgrey">
 </p>
 
 Vibestick keeps your laptop awake when long-running work matters, restores the
@@ -39,10 +39,10 @@ content is published.
 
 ## News
 
-- **2026-05-28**: Added GitHub Actions CI for Windows .NET and macOS Swift builds, tests, and macOS dev bundle artifacts.
-- **2026-05-28**: Added native macOS DMG packaging, first-launch helper setup, and drag-to-install release flow.
-- **2026-05-27**: Added RP2040 device auto-start support through a Windows startup companion and a macOS per-user LaunchAgent watcher.
-- **2026-05-19**: Added the floating desktop pet, task cards, and Codex/coder status bridge.
+- 🎉 **2026-05-28**: Added GitHub Actions CI for Windows .NET and macOS Swift builds, tests, and macOS dev bundle artifacts.
+- 📦 **2026-05-28**: Added native macOS DMG packaging, first-launch helper setup, and drag-to-install release flow.
+- 🔌 **2026-05-27**: Added RP2040 device auto-start support through a Windows startup companion and a macOS per-user LaunchAgent watcher.
+- 🐾 **2026-05-19**: Added the floating desktop pet, task cards, and Codex/coder status bridge.
 
 ## Features
 

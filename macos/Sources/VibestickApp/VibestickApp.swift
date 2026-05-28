@@ -22,6 +22,225 @@ struct VibestickMacApp: App {
     }
 }
 
+private enum PetPresenceMode {
+    case normal
+    case reduced
+}
+
+private enum PetFocusPreference: String {
+    case automatic
+    case on
+    case off
+
+    private static let defaultsKey = "VibestickPetFocusPreference"
+
+    var menuLabel: String {
+        switch self {
+        case .automatic: "自动"
+        case .on: "开启"
+        case .off: "关闭"
+        }
+    }
+
+    var next: PetFocusPreference {
+        switch self {
+        case .automatic: .on
+        case .on: .off
+        case .off: .automatic
+        }
+    }
+
+    static func load() -> PetFocusPreference {
+        let value = UserDefaults.standard.string(forKey: defaultsKey)
+        return value.flatMap(PetFocusPreference.init(rawValue:)) ?? .automatic
+    }
+
+    static func save(_ preference: PetFocusPreference) {
+        UserDefaults.standard.set(preference.rawValue, forKey: defaultsKey)
+    }
+}
+
+private struct PetFocusContext {
+    let petFrame: NSRect?
+    let petVisible: Bool
+}
+
+@MainActor
+private final class PetFocusMonitor {
+    private static let sampleInterval: TimeInterval = 1
+    private static let enterDelay: TimeInterval = 2
+    private static let exitDelay: TimeInterval = 5
+    private static let keyboardRecentThreshold: CFTimeInterval = 0.75
+    private static let mousePetPadding: CGFloat = 90
+    private static let focusBundleIdentifiers = [
+        "com.apple.FaceTime",
+        "com.apple.iWork.Keynote",
+        "com.cisco.webexmeetingsapp",
+        "com.microsoft.Powerpoint",
+        "com.microsoft.teams",
+        "com.microsoft.teams2",
+        "com.tencent.meeting",
+        "us.zoom.xos"
+    ]
+    private static let focusAppNameFragments = [
+        "FaceTime",
+        "Keynote",
+        "Microsoft PowerPoint",
+        "Microsoft Teams",
+        "PowerPoint",
+        "Tencent Meeting",
+        "VooV",
+        "Webex",
+        "Zoom",
+        "腾讯会议"
+    ]
+
+    private let contextProvider: () -> PetFocusContext
+    private let reductionChanged: (Bool) -> Void
+    private var timer: Timer?
+    private var activeSince: Date?
+    private var lastActiveAt: Date?
+    private var isReduced = false
+    private var keyboardActivitySamples = 0
+
+    init(
+        contextProvider: @escaping () -> PetFocusContext,
+        reductionChanged: @escaping (Bool) -> Void
+    ) {
+        self.contextProvider = contextProvider
+        self.reductionChanged = reductionChanged
+    }
+
+    func start() {
+        stop()
+        sample()
+        timer = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.sample()
+            }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func sample() {
+        let now = Date()
+        let context = contextProvider()
+        let active = isFocusContextActive(context)
+
+        if active {
+            if activeSince == nil {
+                activeSince = now
+            }
+            lastActiveAt = now
+        } else {
+            activeSince = nil
+        }
+
+        var nextReduced = isReduced
+        if !isReduced,
+           let activeSince,
+           now.timeIntervalSince(activeSince) >= Self.enterDelay {
+            nextReduced = true
+        } else if isReduced,
+                  let lastActiveAt,
+                  now.timeIntervalSince(lastActiveAt) >= Self.exitDelay {
+            nextReduced = false
+        }
+
+        guard nextReduced != isReduced else {
+            return
+        }
+
+        isReduced = nextReduced
+        reductionChanged(nextReduced)
+    }
+
+    private func isFocusContextActive(_ context: PetFocusContext) -> Bool {
+        let app = NSWorkspace.shared.frontmostApplication
+        return isFocusApp(app)
+            || isFrontmostWindowLarge(app)
+            || isKeyboardActivityDense()
+            || isMouseNearPet(context)
+    }
+
+    private func isFocusApp(_ app: NSRunningApplication?) -> Bool {
+        guard let app, app.bundleIdentifier != VibestickPaths.bundleIdentifier else {
+            return false
+        }
+
+        if let bundleIdentifier = app.bundleIdentifier,
+           Self.focusBundleIdentifiers.contains(where: { $0.caseInsensitiveCompare(bundleIdentifier) == .orderedSame }) {
+            return true
+        }
+
+        guard let name = app.localizedName else {
+            return false
+        }
+
+        return Self.focusAppNameFragments.contains { fragment in
+            name.range(of: fragment, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+
+    private func isKeyboardActivityDense() -> Bool {
+        let secondsSinceKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        if secondsSinceKey <= Self.keyboardRecentThreshold {
+            keyboardActivitySamples = min(keyboardActivitySamples + 1, 4)
+        } else {
+            keyboardActivitySamples = max(keyboardActivitySamples - 1, 0)
+        }
+        return keyboardActivitySamples >= 3
+    }
+
+    private func isMouseNearPet(_ context: PetFocusContext) -> Bool {
+        guard context.petVisible, let petFrame = context.petFrame else {
+            return false
+        }
+        return petFrame.insetBy(dx: -Self.mousePetPadding, dy: -Self.mousePetPadding).contains(NSEvent.mouseLocation)
+    }
+
+    private func isFrontmostWindowLarge(_ app: NSRunningApplication?) -> Bool {
+        guard let app,
+              app.bundleIdentifier != VibestickPaths.bundleIdentifier,
+              let windowList = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID) as? [[String: Any]]
+        else {
+            return false
+        }
+
+        for window in windowList {
+            guard
+                (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == app.processIdentifier,
+                ((window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+                let boundsDictionary = window[kCGWindowBounds as String] as? [String: Any],
+                let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+                windowLooksLarge(bounds)
+            else {
+                continue
+            }
+            return true
+        }
+
+        return false
+    }
+
+    private func windowLooksLarge(_ bounds: CGRect) -> Bool {
+        NSScreen.screens.contains { screen in
+            let frame = screen.frame
+            let visibleFrame = screen.visibleFrame
+            let fillsScreen = bounds.width >= frame.width * 0.94 && bounds.height >= frame.height * 0.90
+            let fillsVisibleArea = bounds.width >= visibleFrame.width * 0.96 && bounds.height >= visibleFrame.height * 0.94
+            return fillsScreen || fillsVisibleArea
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let viewModel = VibestickViewModel()
@@ -30,12 +249,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var taskSummaryMenuItem: NSMenuItem?
     private var petSummaryMenuItem: NSMenuItem?
     private var walkingSummaryMenuItem: NSMenuItem?
+    private var focusSummaryMenuItem: NSMenuItem?
     private var petToggleMenuItem: NSMenuItem?
     private var petWalkingMenuItem: NSMenuItem?
     private var petCardModeMenuItem: NSMenuItem?
+    private var petFocusModeMenuItem: NSMenuItem?
     private var petResetPositionMenuItem: NSMenuItem?
     private var petWindow: PetPanel?
     private var screenParametersObserver: NSObjectProtocol?
+    private var focusMonitor: PetFocusMonitor?
+    private var focusPreference = PetFocusPreference.load()
+    private var autoFocusReduced = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         viewModel.menuStateDidChange = { [weak self] in
@@ -52,6 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateStatusItemState()
             }
         }
+        startFocusMonitor()
         showPet()
         viewModel.refresh()
     }
@@ -61,6 +286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.removeObserver(screenParametersObserver)
         }
         screenParametersObserver = nil
+        focusMonitor?.stop()
+        focusMonitor = nil
         viewModel.shutdown()
     }
 
@@ -83,6 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let walkingSummary = disabledMenuItem("")
         menu.addItem(walkingSummary)
         walkingSummaryMenuItem = walkingSummary
+
+        let focusSummary = disabledMenuItem("")
+        menu.addItem(focusSummary)
+        focusSummaryMenuItem = focusSummary
 
         menu.addItem(.separator())
 
@@ -108,6 +339,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         petCardMode.target = self
         menu.addItem(petCardMode)
         petCardModeMenuItem = petCardMode
+
+        let petFocusMode = NSMenuItem(title: "", action: #selector(cyclePetFocusPreferenceAction), keyEquivalent: "")
+        petFocusMode.target = self
+        menu.addItem(petFocusMode)
+        petFocusModeMenuItem = petFocusMode
 
         let resetPosition = NSMenuItem(title: "重置桌宠位置", action: #selector(resetPetPositionAction), keyEquivalent: "")
         resetPosition.target = self
@@ -157,6 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusItemState()
     }
 
+    @objc private func cyclePetFocusPreferenceAction() {
+        cycleFocusPreference()
+    }
+
     private func showPet() {
         if petWindow == nil {
             petWindow = PetPanel(
@@ -164,10 +404,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 openControlPanel: { [weak self] in self?.openControlPanel() },
                 hidePet: { [weak self] in self?.hidePet() },
                 quitApplication: { [weak self] in self?.quit() },
+                cycleFocusPreference: { [weak self] in self?.cycleFocusPreference() },
+                focusActionTitle: { [weak self] in self?.focusActionTitle ?? "勿扰模式：自动" },
                 menuStateDidChange: { [weak self] in self?.updateStatusItemState() })
         }
         petWindow?.orderFrontRegardless()
         petWindow?.startWalking()
+        applyFocusPresence()
         updateStatusItemState()
     }
 
@@ -205,7 +448,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         petWalkingMenuItem?.isEnabled = petVisible
         petCardModeMenuItem?.title = petWindow?.cardDisplayModeActionTitle ?? "切换任务卡"
         petCardModeMenuItem?.isEnabled = petVisible
+        petFocusModeMenuItem?.title = focusActionTitle
+        petFocusModeMenuItem?.isEnabled = petVisible
         petResetPositionMenuItem?.isEnabled = petVisible
+        petWindow?.refreshFocusPreferenceMenuText()
     }
 
     private func updateSummaryMenuItems() {
@@ -214,6 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         taskSummaryMenuItem?.title = activeTaskCount == 0 ? "任务：无活跃任务" : "任务：\(activeTaskCount) 个活跃任务"
         petSummaryMenuItem?.title = "桌宠：\(petWindow?.isVisible == true ? "显示" : "隐藏")"
         walkingSummaryMenuItem?.title = "行走：\((petWindow?.isWalkingEnabled ?? PetPanel.savedWalkingEnabled) ? "行走中" : "暂停")"
+        focusSummaryMenuItem?.title = "勿扰：\(focusSummaryText)"
     }
 
     private func updateStatusIcon() {
@@ -259,6 +506,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .off:
             return "circle.fill"
         }
+    }
+
+    private var focusActionTitle: String {
+        "勿扰模式：\(focusPreference.menuLabel)"
+    }
+
+    private var focusSummaryText: String {
+        switch focusPreference {
+        case .automatic:
+            return autoFocusReduced ? "已降低" : "自动"
+        case .on:
+            return "开启"
+        case .off:
+            return "关闭"
+        }
+    }
+
+    private func startFocusMonitor() {
+        focusMonitor = PetFocusMonitor(
+            contextProvider: { [weak self] in
+                guard let self else {
+                    return PetFocusContext(petFrame: nil, petVisible: false)
+                }
+                return PetFocusContext(
+                    petFrame: self.petWindow?.isVisible == true ? self.petWindow?.frame : nil,
+                    petVisible: self.petWindow?.isVisible == true)
+            },
+            reductionChanged: { [weak self] reduced in
+                self?.autoFocusReduced = reduced
+                self?.applyFocusPresence()
+                self?.updateStatusItemState()
+            })
+        focusMonitor?.start()
+    }
+
+    private func cycleFocusPreference() {
+        focusPreference = focusPreference.next
+        PetFocusPreference.save(focusPreference)
+        applyFocusPresence()
+        updateStatusItemState()
+    }
+
+    private func applyFocusPresence() {
+        let shouldReduce: Bool
+        switch focusPreference {
+        case .automatic:
+            shouldReduce = autoFocusReduced
+        case .on:
+            shouldReduce = true
+        case .off:
+            shouldReduce = false
+        }
+        petWindow?.setPresenceMode(shouldReduce ? .reduced : .normal)
     }
 
     @objc private func quit() {
@@ -413,13 +713,17 @@ final class VibestickViewModel: ObservableObject {
         let coderSource = coderSource
         let petResolver = petResolver
         let status = latestStatus ?? Self.defaultPetStatus()
-        coderRefreshTask = Task.detached(priority: .utility) { [weak self] in
-            let coders = coderSource.getStatuses(now: Date())
-            let pet = petResolver.resolve(status: status, coders: coders)
+        coderRefreshTask = Task(priority: .utility) { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                let coders = coderSource.getStatuses(now: Date())
+                let pet = petResolver.resolve(status: status, coders: coders)
+                return (coders, pet)
+            }.value
 
-            await MainActor.run {
-                self?.finishCoderRefresh(coders: coders, pet: pet)
+            guard !Task.isCancelled else {
+                return
             }
+            self?.finishCoderRefresh(coders: result.0, pet: result.1)
         }
     }
 
@@ -432,19 +736,23 @@ final class VibestickViewModel: ObservableObject {
         let helperInstaller = helperInstaller
         let deviceWatcherInstaller = deviceWatcherInstaller
         let firstLaunchInstaller = firstLaunchInstaller
-        refreshTask = Task.detached(priority: .utility) { [weak self] in
-            let status = engine.status()
-            let helperPreflight = helperInstaller.preflight()
-            let deviceWatcherStatus = deviceWatcherInstaller.status()
-            let firstLaunchStatus = firstLaunchInstaller.status()
+        refreshTask = Task(priority: .utility) { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                let status = engine.status()
+                let helperPreflight = helperInstaller.preflight()
+                let deviceWatcherStatus = deviceWatcherInstaller.status()
+                let firstLaunchStatus = firstLaunchInstaller.status()
+                return (status, helperPreflight, deviceWatcherStatus, firstLaunchStatus)
+            }.value
 
-            await MainActor.run {
-                self?.finishSystemRefresh(
-                    status: status,
-                    helperPreflight: helperPreflight,
-                    deviceWatcherStatus: deviceWatcherStatus,
-                    firstLaunchStatus: firstLaunchStatus)
+            guard !Task.isCancelled else {
+                return
             }
+            self?.finishSystemRefresh(
+                status: result.0,
+                helperPreflight: result.1,
+                deviceWatcherStatus: result.2,
+                firstLaunchStatus: result.3)
         }
     }
 
@@ -870,10 +1178,17 @@ private enum PetCardDisplayMode: String {
 @MainActor
 private final class PetPanelState: ObservableObject {
     @Published var cardDisplayMode: PetCardDisplayMode
+    @Published var isPresenceReduced: Bool
 
-    init(cardDisplayMode: PetCardDisplayMode) {
+    init(cardDisplayMode: PetCardDisplayMode, isPresenceReduced: Bool = false) {
         self.cardDisplayMode = cardDisplayMode
+        self.isPresenceReduced = isPresenceReduced
     }
+}
+
+private struct PetPresenceSnapshot {
+    let frame: NSRect
+    let retainedScreenIdentifier: String?
 }
 
 @MainActor
@@ -889,9 +1204,12 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private let openControlPanel: () -> Void
     private let hidePet: () -> Void
     private let quitApplication: () -> Void
+    private let cycleFocusPreference: () -> Void
+    private let focusActionTitle: () -> String
     private let menuStateDidChange: () -> Void
     private let walkingToggleMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let cardDisplayModeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let focusModeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let panelState = PetPanelState(cardDisplayMode: PetPanel.loadCardDisplayMode())
     private let spriteAnimator = MacPetSpriteAnimator()
     private let spriteLayerView = MacPetSpriteLayerView()
@@ -905,8 +1223,13 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var walkingEnabled = PetPanel.loadWalkingEnabled()
     private var spriteHovering = false
     private var retainedScreenIdentifier = PetPanel.loadSavedScreenIdentifier()
+    private var presenceMode: PetPresenceMode = .normal
+    private var presenceSnapshot: PetPresenceSnapshot?
+    private var manualInteractionDuringReduced = false
     private static let minimumWalkableWidth: CGFloat = 8
     private static let edgeTolerance: CGFloat = 2
+    private static let reducedAlpha: CGFloat = 0.42
+    private static let reducedCornerMargin: CGFloat = 12
     private let bottomMargin: CGFloat = 16
 
     init(
@@ -914,12 +1237,16 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         openControlPanel: @escaping () -> Void,
         hidePet: @escaping () -> Void,
         quitApplication: @escaping () -> Void,
+        cycleFocusPreference: @escaping () -> Void,
+        focusActionTitle: @escaping () -> String,
         menuStateDidChange: @escaping () -> Void = {})
     {
         self.viewModel = viewModel
         self.openControlPanel = openControlPanel
         self.hidePet = hidePet
         self.quitApplication = quitApplication
+        self.cycleFocusPreference = cycleFocusPreference
+        self.focusActionTitle = focusActionTitle
         self.menuStateDidChange = menuStateDidChange
         super.init(
             contentRect: Self.initialFrame(),
@@ -979,6 +1306,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         "任务卡：\(panelState.cardDisplayMode.menuLabel)"
     }
 
+    var isPresenceReduced: Bool {
+        presenceMode == .reduced
+    }
+
     func startWalking() {
         if walkingEnabled {
             resumeWalkingFromCurrentPosition()
@@ -997,6 +1328,12 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     func screenParametersDidChange() {
         pauseUntil = nil
         lastTick = nil
+        if presenceMode == .reduced {
+            moveToReducedCorner()
+            updateSpritePresentation(at: Date(), force: true)
+            return
+        }
+
         if walkingEnabled {
             resumeWalkingFromCurrentPosition()
         } else {
@@ -1012,8 +1349,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         pauseUntil = nil
         lastTick = nil
 
-        if walkingEnabled {
+        if walkingEnabled, presenceMode == .normal {
             resumeWalkingFromCurrentPosition()
+        } else if presenceMode == .reduced {
+            moveToReducedCorner()
         }
 
         updateWalkingMenuText()
@@ -1025,13 +1364,35 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         setCardDisplayMode(panelState.cardDisplayMode.next)
     }
 
+    fileprivate func setPresenceMode(_ mode: PetPresenceMode) {
+        guard presenceMode != mode else {
+            return
+        }
+
+        switch mode {
+        case .normal:
+            exitReducedPresence()
+        case .reduced:
+            enterReducedPresence()
+        }
+
+        menuStateDidChange()
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func refreshFocusPreferenceMenuText() {
+        updateFocusModeMenuText()
+    }
+
     func resetPetPosition() {
         clearSavedPosition()
         pauseUntil = nil
         lastTick = nil
         setFrameOrigin(Self.clampedFrame(Self.defaultFrame, preferredScreenIdentifier: nil).origin)
 
-        if walkingEnabled {
+        if presenceMode == .reduced {
+            moveToReducedCorner()
+        } else if walkingEnabled {
             resumeWalkingFromCurrentPosition()
         } else {
             saveCurrentPosition()
@@ -1042,6 +1403,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         updateWalkingMenuText()
         updateCardDisplayModeMenuText()
+        updateFocusModeMenuText()
     }
 
     override func close() {
@@ -1061,10 +1423,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func updateWalkPosition(at now: Date) {
-        guard walkingEnabled else {
+        guard walkingEnabled, presenceMode == .normal else {
             pauseUntil = nil
             nextWanderAt = nil
-            crawlAnimationSuppressed = false
+            crawlAnimationSuppressed = presenceMode == .reduced
             lastTick = now
             return
         }
@@ -1123,6 +1485,9 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func beginManualDrag() {
+        if presenceMode == .reduced {
+            manualInteractionDuringReduced = true
+        }
         if walkingEnabled {
             walkingEnabled = false
             UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
@@ -1140,6 +1505,60 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     private func finishManualDrag() {
         saveCurrentPosition()
+    }
+
+    private func enterReducedPresence() {
+        presenceSnapshot = PetPresenceSnapshot(frame: frame, retainedScreenIdentifier: retainedScreenIdentifier)
+        manualInteractionDuringReduced = false
+        presenceMode = .reduced
+        alphaValue = Self.reducedAlpha
+        panelState.isPresenceReduced = true
+        pauseUntil = nil
+        lastTick = nil
+        nextWanderAt = nil
+        crawlAnimationSuppressed = true
+        moveToReducedCorner()
+    }
+
+    private func exitReducedPresence() {
+        let snapshot = presenceSnapshot
+        presenceMode = .normal
+        alphaValue = 1
+        panelState.isPresenceReduced = false
+        pauseUntil = nil
+        lastTick = nil
+        nextWanderAt = nil
+        crawlAnimationSuppressed = false
+
+        if let snapshot, !manualInteractionDuringReduced {
+            retainedScreenIdentifier = snapshot.retainedScreenIdentifier
+            setFrameOrigin(clampedOrigin(snapshot.frame.origin))
+        } else {
+            clampCurrentPosition()
+        }
+
+        presenceSnapshot = nil
+        manualInteractionDuringReduced = false
+
+        if walkingEnabled {
+            resumeWalkingFromCurrentPosition()
+        }
+    }
+
+    private func moveToReducedCorner() {
+        guard let screen = targetScreen(for: frame, preferRetainedScreen: true) else {
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - frame.width - Self.reducedCornerMargin)
+        let leftX = min(visibleFrame.minX + Self.reducedCornerMargin, maxX)
+        let rightX = maxX
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
+        let bottomY = min(max(visibleFrame.minY + bottomMargin, visibleFrame.minY), maxY)
+        let targetX = frame.midX < visibleFrame.midX ? leftX : rightX
+        setFrameOrigin(NSPoint(x: targetX, y: bottomY))
+        retainedScreenIdentifier = Self.screenIdentifier(for: screen)
     }
 
     private func alignToWalkLane(resetDirection: Bool = false) {
@@ -1289,6 +1708,11 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         updateCardDisplayModeMenuText()
         menu.addItem(cardDisplayModeMenuItem)
 
+        focusModeMenuItem.target = self
+        focusModeMenuItem.action = #selector(cycleFocusModeFromMenu)
+        updateFocusModeMenuText()
+        menu.addItem(focusModeMenuItem)
+
         let resetPosition = NSMenuItem(title: "重置桌宠位置", action: #selector(resetPetPositionFromMenu), keyEquivalent: "")
         resetPosition.target = self
         menu.addItem(resetPosition)
@@ -1320,6 +1744,11 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     @objc private func cycleCardDisplayModeFromMenu() {
         cycleCardDisplayMode()
+    }
+
+    @objc private func cycleFocusModeFromMenu() {
+        cycleFocusPreference()
+        updateFocusModeMenuText()
     }
 
     @objc private func quitFromMenu() {
@@ -1358,6 +1787,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     private func updateCardDisplayModeMenuText() {
         cardDisplayModeMenuItem.title = "任务卡：\(panelState.cardDisplayMode.menuLabel)"
+    }
+
+    private func updateFocusModeMenuText() {
+        focusModeMenuItem.title = focusActionTitle()
     }
 
     @objc private func resetPetPositionFromMenu() {
@@ -1485,7 +1918,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
-        guard walkingEnabled, !spriteHovering, !crawlAnimationSuppressed else {
+        guard walkingEnabled, presenceMode == .normal, !spriteHovering, !crawlAnimationSuppressed else {
             return nil
         }
         if let pauseUntil, pauseUntil > now {
@@ -1673,13 +2106,17 @@ private struct PetView: View {
 
     @ViewBuilder
     private var cardArea: some View {
-        switch panelState.cardDisplayMode {
-        case .hidden:
+        if panelState.isPresenceReduced {
             EmptyView()
-        case .compact:
-            compactCard
-        case .full:
-            fullCards
+        } else {
+            switch panelState.cardDisplayMode {
+            case .hidden:
+                EmptyView()
+            case .compact:
+                compactCard
+            case .full:
+                fullCards
+            }
         }
     }
 
@@ -1714,14 +2151,20 @@ private struct PetView: View {
     }
 
     private func taskCard(for coder: CoderAgentStatus, detailLineLimit: Int) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(coder.taskSummary ?? coder.agent)
-                .font(.system(size: 15, weight: .semibold))
-                .lineLimit(1)
-            Text(coder.taskDetail ?? coder.message ?? coder.phase.rawValue)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(detailLineLimit)
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(coder.taskSummary ?? coder.agent)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                Text(coder.taskDetail ?? coder.message ?? coder.phase.rawValue)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(detailLineLimit)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            taskStatusAccessory(for: coder.phase)
+                .frame(width: 22, height: 22)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
@@ -1731,6 +2174,25 @@ private struct PetView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(.white.opacity(0.18), lineWidth: 1))
         .shadow(color: .black.opacity(0.22), radius: 6, x: 0, y: 3)
+    }
+
+    @ViewBuilder
+    private func taskStatusAccessory(for phase: CoderAgentPhase) -> some View {
+        switch phase {
+        case .running, .reasoning, .toolCalling:
+            ProgressView()
+                .progressViewStyle(.circular)
+                .controlSize(.small)
+                .accessibilityLabel("任务进行中")
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.green)
+                .accessibilityLabel("完成 ✅")
+        case .idle, .sleeping, .waitingAuthorization, .error, .offline, .unknown:
+            Color.clear
+                .accessibilityHidden(true)
+        }
     }
 
     private func statusCard(detailLineLimit: Int) -> some View {
