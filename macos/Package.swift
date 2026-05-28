@@ -47,6 +47,9 @@ let package = Package(
             ]),
         .testTarget(
             name: "VibestickMacCoreTests",
-            dependencies: ["VibestickMacCore"])
+            dependencies: ["VibestickMacCore"]),
+        .testTarget(
+            name: "VibestickAppTests",
+            dependencies: ["VibestickApp"])
     ]
 )

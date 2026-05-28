@@ -134,6 +134,9 @@ final class MacPetSpriteAnimator {
     }
 
     private func resolveClip() -> PetAnimationClip {
+        if crawlDirection != nil {
+            return Self.clips["patrol_crawl"]!
+        }
         if isHovering {
             randomActionClip = nil
             return Self.clips["attention_paw"]!
@@ -141,9 +144,6 @@ final class MacPetSpriteAnimator {
         if let fixedClip = fixedStateClip(for: mood) {
             randomActionClip = nil
             return fixedClip
-        }
-        if crawlDirection != nil {
-            return Self.clips["patrol_crawl"]!
         }
         if let randomActionClip {
             return randomActionClip

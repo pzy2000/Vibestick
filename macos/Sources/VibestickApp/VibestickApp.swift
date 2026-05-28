@@ -1918,7 +1918,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
-        guard walkingEnabled, presenceMode == .normal, !spriteHovering, !crawlAnimationSuppressed else {
+        guard walkingEnabled, presenceMode == .normal, !crawlAnimationSuppressed else {
             return nil
         }
         if let pauseUntil, pauseUntil > now {
