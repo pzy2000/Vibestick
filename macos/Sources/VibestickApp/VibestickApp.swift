@@ -471,14 +471,66 @@ struct ControlPanelView: View {
 }
 
 @MainActor
+private enum PetCardDisplayMode: String {
+    case hidden
+    case compact
+    case full
+
+    var menuLabel: String {
+        switch self {
+        case .hidden: "隐藏"
+        case .compact: "紧凑"
+        case .full: "完整"
+        }
+    }
+
+    var next: PetCardDisplayMode {
+        switch self {
+        case .hidden: .compact
+        case .compact: .full
+        case .full: .hidden
+        }
+    }
+
+    var expanded: PetCardDisplayMode {
+        switch self {
+        case .hidden: .compact
+        case .compact, .full: .full
+        }
+    }
+
+    var collapsed: PetCardDisplayMode {
+        switch self {
+        case .hidden, .compact: .hidden
+        case .full: .compact
+        }
+    }
+}
+
+@MainActor
+private final class PetPanelState: ObservableObject {
+    @Published var cardDisplayMode: PetCardDisplayMode
+
+    init(cardDisplayMode: PetCardDisplayMode) {
+        self.cardDisplayMode = cardDisplayMode
+    }
+}
+
+@MainActor
 final class PetPanel: NSPanel, NSMenuDelegate {
     private static let walkingEnabledDefaultsKey = "VibestickPetWalkingEnabled"
+    private static let originXDefaultsKey = "VibestickPetWindowOriginX"
+    private static let originYDefaultsKey = "VibestickPetWindowOriginY"
+    private static let cardDisplayModeDefaultsKey = "VibestickPetCardDisplayMode"
+    private static let defaultFrame = NSRect(x: 120, y: 120, width: 356, height: 476)
 
     private let viewModel: VibestickViewModel
     private let openControlPanel: () -> Void
     private let hidePet: () -> Void
     private let quitApplication: () -> Void
     private let walkingToggleMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let cardDisplayModeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let panelState = PetPanelState(cardDisplayMode: PetPanel.loadCardDisplayMode())
     private let spriteAnimator = MacPetSpriteAnimator()
     private let spriteLayerView = MacPetSpriteLayerView()
     private var displayLink: MacPetDisplayLink?
@@ -501,27 +553,53 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         self.hidePet = hidePet
         self.quitApplication = quitApplication
         super.init(
-            contentRect: NSRect(x: 120, y: 120, width: 356, height: 476),
+            contentRect: Self.initialFrame(),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false)
         let hosting = PetHostingView(rootView: PetView(
             viewModel: viewModel,
+            panelState: panelState,
             spriteLayerView: spriteLayerView,
             onHoverChanged: { [weak self] hovering in
                 self?.setSpriteHovering(hovering)
             }))
+        hosting.onPrimaryClick = { [weak self] in
+            self?.cycleCardDisplayMode()
+        }
+        hosting.onDoubleClick = { [weak self] in
+            self?.openControlPanel()
+        }
+        hosting.onCommandClick = { [weak self] in
+            self?.hidePet()
+        }
+        hosting.onScroll = { [weak self] deltaY in
+            self?.adjustCardDisplayMode(scrollDeltaY: deltaY)
+        }
+        hosting.onDragStart = { [weak self] in
+            self?.beginManualDrag()
+        }
+        hosting.onDragTo = { [weak self] origin in
+            self?.moveManually(to: origin)
+        }
+        hosting.onDragEnd = { [weak self] in
+            self?.finishManualDrag()
+        }
         contentView = hosting
         hosting.petContextMenu = buildContextMenu()
         isOpaque = false
         backgroundColor = .clear
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
     }
 
     func startWalking() {
-        alignToWalkLane()
+        if walkingEnabled {
+            alignToWalkLane()
+        } else {
+            clampCurrentPosition()
+        }
         displayLink?.invalidate()
         let displayLink = MacPetDisplayLink { [weak self] date in
             self?.displayTick(at: date)
@@ -533,6 +611,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         updateWalkingMenuText()
+        updateCardDisplayModeMenuText()
     }
 
     override func close() {
@@ -590,6 +669,25 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         setFrameOrigin(next.origin)
     }
 
+    private func beginManualDrag() {
+        if walkingEnabled {
+            walkingEnabled = false
+            UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
+        }
+        pauseUntil = nil
+        lastTick = nil
+        updateWalkingMenuText()
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    private func moveManually(to origin: NSPoint) {
+        setFrameOrigin(clampedOrigin(origin))
+    }
+
+    private func finishManualDrag() {
+        saveCurrentPosition()
+    }
+
     private func alignToWalkLane() {
         guard let screen = screen ?? NSScreen.main else {
             return
@@ -598,6 +696,29 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         next.origin.y = screen.visibleFrame.minY + bottomMargin
         next.origin.x = min(max(next.origin.x, screen.visibleFrame.minX), screen.visibleFrame.maxX - next.width)
         setFrameOrigin(next.origin)
+    }
+
+    private func clampCurrentPosition() {
+        setFrameOrigin(clampedOrigin(frame.origin))
+    }
+
+    private func clampedOrigin(_ origin: NSPoint) -> NSPoint {
+        var nextFrame = frame
+        nextFrame.origin = origin
+        guard let targetScreen = screen(containing: nextFrame) ?? screen ?? NSScreen.main else {
+            return origin
+        }
+
+        let visibleFrame = targetScreen.visibleFrame
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - nextFrame.width)
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - nextFrame.height)
+        return NSPoint(
+            x: min(max(origin.x, visibleFrame.minX), maxX),
+            y: min(max(origin.y, visibleFrame.minY), maxY))
+    }
+
+    private func screen(containing rect: NSRect) -> NSScreen? {
+        NSScreen.screens.first { $0.visibleFrame.intersects(rect) }
     }
 
     private func buildContextMenu() -> NSMenu {
@@ -616,6 +737,15 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         walkingToggleMenuItem.action = #selector(toggleWalkingFromMenu)
         updateWalkingMenuText()
         menu.addItem(walkingToggleMenuItem)
+
+        cardDisplayModeMenuItem.target = self
+        cardDisplayModeMenuItem.action = #selector(cycleCardDisplayModeFromMenu)
+        updateCardDisplayModeMenuText()
+        menu.addItem(cardDisplayModeMenuItem)
+
+        let resetPosition = NSMenuItem(title: "重置桌宠位置", action: #selector(resetPetPositionFromMenu), keyEquivalent: "")
+        resetPosition.target = self
+        menu.addItem(resetPosition)
 
         let hide = NSMenuItem(title: "隐藏桌宠", action: #selector(hidePetFromMenu), keyEquivalent: "")
         hide.target = self
@@ -652,6 +782,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         updateSpritePresentation(at: Date(), force: true)
     }
 
+    @objc private func cycleCardDisplayModeFromMenu() {
+        cycleCardDisplayMode()
+    }
+
     @objc private func quitFromMenu() {
         quitApplication()
     }
@@ -664,12 +798,92 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         walkingToggleMenuItem.title = walkingEnabled ? "暂停行走" : "恢复行走"
     }
 
+    private func cycleCardDisplayMode() {
+        setCardDisplayMode(panelState.cardDisplayMode.next)
+    }
+
+    private func adjustCardDisplayMode(scrollDeltaY: CGFloat) {
+        guard scrollDeltaY != 0 else {
+            return
+        }
+
+        let nextMode = scrollDeltaY > 0
+            ? panelState.cardDisplayMode.expanded
+            : panelState.cardDisplayMode.collapsed
+        setCardDisplayMode(nextMode)
+    }
+
+    private func setCardDisplayMode(_ mode: PetCardDisplayMode) {
+        guard panelState.cardDisplayMode != mode else {
+            return
+        }
+
+        panelState.cardDisplayMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.cardDisplayModeDefaultsKey)
+        updateCardDisplayModeMenuText()
+    }
+
+    private func updateCardDisplayModeMenuText() {
+        cardDisplayModeMenuItem.title = "任务卡：\(panelState.cardDisplayMode.menuLabel)"
+    }
+
+    @objc private func resetPetPositionFromMenu() {
+        clearSavedPosition()
+        pauseUntil = nil
+        lastTick = nil
+
+        if walkingEnabled {
+            alignToWalkLane()
+        } else {
+            setFrameOrigin(clampedOrigin(Self.defaultFrame.origin))
+            saveCurrentPosition()
+        }
+    }
+
     private static func loadWalkingEnabled() -> Bool {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: walkingEnabledDefaultsKey) != nil else {
             return true
         }
         return defaults.bool(forKey: walkingEnabledDefaultsKey)
+    }
+
+    private static func loadCardDisplayMode() -> PetCardDisplayMode {
+        let value = UserDefaults.standard.string(forKey: cardDisplayModeDefaultsKey)
+        return value.flatMap(PetCardDisplayMode.init(rawValue:)) ?? .full
+    }
+
+    private static func initialFrame() -> NSRect {
+        var frame = defaultFrame
+        if let savedOrigin = loadSavedOrigin() {
+            frame.origin = savedOrigin
+        }
+        return frame
+    }
+
+    private static func loadSavedOrigin() -> NSPoint? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: originXDefaultsKey) != nil,
+              defaults.object(forKey: originYDefaultsKey) != nil
+        else {
+            return nil
+        }
+
+        return NSPoint(
+            x: defaults.double(forKey: originXDefaultsKey),
+            y: defaults.double(forKey: originYDefaultsKey))
+    }
+
+    private func saveCurrentPosition() {
+        let defaults = UserDefaults.standard
+        defaults.set(Double(frame.origin.x), forKey: Self.originXDefaultsKey)
+        defaults.set(Double(frame.origin.y), forKey: Self.originYDefaultsKey)
+    }
+
+    private func clearSavedPosition() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: Self.originXDefaultsKey)
+        defaults.removeObject(forKey: Self.originYDefaultsKey)
     }
 
     private func setSpriteHovering(_ hovering: Bool) {
@@ -702,23 +916,53 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
 @MainActor
 private final class PetHostingView: NSHostingView<PetView> {
+    var onPrimaryClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+    var onCommandClick: (() -> Void)?
+    var onScroll: ((CGFloat) -> Void)?
+    var onDragStart: (() -> Void)?
+    var onDragTo: ((NSPoint) -> Void)?
+    var onDragEnd: (() -> Void)?
+
     var petContextMenu: NSMenu? {
         didSet {
             menu = petContextMenu
         }
     }
 
+    private let dragThreshold: CGFloat = 4
+    private var pendingPrimaryClick: DispatchWorkItem?
+
     override func rightMouseDown(with event: NSEvent) {
+        cancelPendingPrimaryClick()
         showPetContextMenu(with: event)
     }
 
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control) {
+            cancelPendingPrimaryClick()
             showPetContextMenu(with: event)
             return
         }
 
-        super.mouseDown(with: event)
+        if event.modifierFlags.contains(.command) {
+            cancelPendingPrimaryClick()
+            onCommandClick?()
+            return
+        }
+
+        if event.clickCount >= 2 {
+            cancelPendingPrimaryClick()
+            onDoubleClick?()
+            return
+        }
+
+        trackPrimaryMouse(from: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        cancelPendingPrimaryClick()
+        onScroll?(event.scrollingDeltaY)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -733,27 +977,95 @@ private final class PetHostingView: NSHostingView<PetView> {
 
         NSMenu.popUpContextMenu(petContextMenu, with: event, for: self)
     }
+
+    private func trackPrimaryMouse(from event: NSEvent) {
+        guard let window else {
+            schedulePrimaryClick()
+            return
+        }
+
+        let startMouseLocation = NSEvent.mouseLocation
+        let startWindowOrigin = window.frame.origin
+        var isDragging = false
+
+        while true {
+            guard let nextEvent = window.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp],
+                until: .distantFuture,
+                inMode: .eventTracking,
+                dequeue: true)
+            else {
+                break
+            }
+
+            let currentMouseLocation = NSEvent.mouseLocation
+            let delta = NSPoint(
+                x: currentMouseLocation.x - startMouseLocation.x,
+                y: currentMouseLocation.y - startMouseLocation.y)
+            let distance = hypot(delta.x, delta.y)
+
+            if nextEvent.type == .leftMouseDragged {
+                if !isDragging, distance >= dragThreshold {
+                    isDragging = true
+                    cancelPendingPrimaryClick()
+                    onDragStart?()
+                }
+
+                if isDragging {
+                    onDragTo?(NSPoint(
+                        x: startWindowOrigin.x + delta.x,
+                        y: startWindowOrigin.y + delta.y))
+                }
+                continue
+            }
+
+            if isDragging {
+                onDragEnd?()
+            } else {
+                schedulePrimaryClick()
+            }
+            break
+        }
+    }
+
+    private func schedulePrimaryClick() {
+        cancelPendingPrimaryClick()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.pendingPrimaryClick = nil
+            self?.onPrimaryClick?()
+        }
+        pendingPrimaryClick = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: workItem)
+    }
+
+    private func cancelPendingPrimaryClick() {
+        pendingPrimaryClick?.cancel()
+        pendingPrimaryClick = nil
+    }
 }
 
-struct PetView: View {
+private struct PetView: View {
     @ObservedObject var viewModel: VibestickViewModel
+    @ObservedObject var panelState: PetPanelState
     let spriteLayerView: MacPetSpriteLayerView
     let onHoverChanged: (Bool) -> Void
     @State private var isHovering = false
 
     init(
         viewModel: VibestickViewModel,
+        panelState: PetPanelState,
         spriteLayerView: MacPetSpriteLayerView,
         onHoverChanged: @escaping (Bool) -> Void)
     {
         self.viewModel = viewModel
+        self.panelState = panelState
         self.spriteLayerView = spriteLayerView
         self.onHoverChanged = onHoverChanged
     }
 
     var body: some View {
         VStack(spacing: 8) {
-            taskCards
+            cardArea
             ZStack(alignment: .bottom) {
                 Ellipse()
                     .fill(.black.opacity(0.18))
@@ -768,9 +1080,6 @@ struct PetView: View {
                 isHovering = hovering
                 onHoverChanged(hovering)
             }
-            if viewModel.petCoders.isEmpty {
-                statusBubble
-            }
         }
         .padding(10)
     }
@@ -780,32 +1089,69 @@ struct PetView: View {
             .frame(width: 194, height: 210)
     }
 
+    @ViewBuilder
+    private var cardArea: some View {
+        switch panelState.cardDisplayMode {
+        case .hidden:
+            EmptyView()
+        case .compact:
+            compactCard
+        case .full:
+            fullCards
+        }
+    }
+
+    @ViewBuilder
+    private var compactCard: some View {
+        if let coder = viewModel.petCoders.first {
+            taskCard(for: coder, detailLineLimit: 1)
+                .frame(width: 292)
+        } else {
+            statusCard(detailLineLimit: 1)
+                .frame(width: 292)
+        }
+    }
+
+    @ViewBuilder
+    private var fullCards: some View {
+        if viewModel.petCoders.isEmpty {
+            statusCard(detailLineLimit: 2)
+                .frame(width: 308)
+        } else {
+            taskCards
+        }
+    }
+
     private var taskCards: some View {
         VStack(spacing: 6) {
             ForEach(viewModel.petCoders, id: \.identity) { coder in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(coder.taskSummary ?? coder.agent)
-                        .font(.system(size: 15, weight: .semibold))
-                        .lineLimit(1)
-                    Text(coder.taskDetail ?? coder.message ?? coder.phase.rawValue)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.white.opacity(0.18), lineWidth: 1))
-                .shadow(color: .black.opacity(0.22), radius: 6, x: 0, y: 3)
+                taskCard(for: coder, detailLineLimit: 2)
             }
         }
         .frame(width: 332)
     }
 
-    private var statusBubble: some View {
+    private func taskCard(for coder: CoderAgentStatus, detailLineLimit: Int) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(coder.taskSummary ?? coder.agent)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+            Text(coder.taskDetail ?? coder.message ?? coder.phase.rawValue)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(detailLineLimit)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(0.18), lineWidth: 1))
+        .shadow(color: .black.opacity(0.22), radius: 6, x: 0, y: 3)
+    }
+
+    private func statusCard(detailLineLimit: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(viewModel.petTitle)
                 .font(.system(size: 15, weight: .semibold))
@@ -813,9 +1159,9 @@ struct PetView: View {
             Text(viewModel.petMessage)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .lineLimit(detailLineLimit)
         }
-        .frame(width: 308, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))

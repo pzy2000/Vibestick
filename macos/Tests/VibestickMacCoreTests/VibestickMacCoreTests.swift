@@ -554,6 +554,69 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(statuses[0].taskSummary, "Implement task cards")
     }
 
+    func testMacProcessInspectorDetectsCodexAppWhenCommIsTruncated() {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+             2087 /Applications/Co /Applications/Codex.app/Contents/MacOS/Codex
+            """,
+            standardError: "")
+        let inspector = MacProcessInspector(runner: runner)
+
+        let tasks = inspector.getLongTasks(whitelist: ["codex"])
+
+        XCTAssertEqual(tasks, [LongTaskProcess(processId: 2087, name: "codex")])
+        XCTAssertEqual(runner.invocations, [["/bin/ps", "-axo", "pid=,comm=,args="]])
+    }
+
+    func testMacProcessInspectorDetectsBundledCodexAppServerExecutable() {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+             2187 /Applications/Co /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+            """,
+            standardError: "")
+        let inspector = MacProcessInspector(runner: runner)
+
+        let tasks = inspector.getLongTasks(whitelist: ["codex"])
+
+        XCTAssertEqual(tasks, [LongTaskProcess(processId: 2187, name: "codex")])
+    }
+
+    func testMacProcessInspectorDetectsCodexHostedByKnownCommandRunner() {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+              321 npx npx codex app-server --listen stdio://
+            """,
+            standardError: "")
+        let inspector = MacProcessInspector(runner: runner)
+
+        let tasks = inspector.getLongTasks(whitelist: ["codex"])
+
+        XCTAssertEqual(tasks, [LongTaskProcess(processId: 321, name: "codex")])
+    }
+
+    func testMacProcessInspectorDoesNotTreatCodexSubstringsAsCodexProcess() {
+        let runner = FakeRunner()
+        runner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+             2705 /Applications/Co /Applications/Codex.app/Contents/Resources/codex_chronicle
+             2103 /Applications/Co /Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process
+            15042 /bin/zsh /bin/zsh -lc echo codex
+            """,
+            standardError: "")
+        let inspector = MacProcessInspector(runner: runner)
+
+        let tasks = inspector.getLongTasks(whitelist: ["codex"])
+
+        XCTAssertEqual(tasks, [])
+    }
+
     func testDeviceDetectorLaunchesForFinalVibestickFirmware() {
         let detection = DeviceDetector.detect([
             DeviceSnapshot(instanceId: "USB\\VID_2E8A&PID_4002\\VS-RP2040-0002")

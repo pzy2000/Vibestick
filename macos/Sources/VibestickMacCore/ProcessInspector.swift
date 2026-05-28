@@ -27,6 +27,9 @@ public final class MacProcessInspector: ProcessInspecting, @unchecked Sendable {
             let commandLine = parts.count == 3 ? String(parts[2]) : ""
             if let match = Self.matchProcessName(name, whitelist: whitelist), byName[match] == nil {
                 byName[match] = LongTaskProcess(processId: pid, name: match)
+            } else if let executableMatch = Self.matchCommandExecutable(commandLine: commandLine, whitelist: whitelist),
+                      byName[executableMatch] == nil {
+                byName[executableMatch] = LongTaskProcess(processId: pid, name: executableMatch)
             } else if let commandMatch = Self.matchCommandLine(processName: name, commandLine: commandLine, whitelist: whitelist),
                       byName[commandMatch] == nil {
                 byName[commandMatch] = LongTaskProcess(processId: pid, name: commandMatch)
@@ -50,12 +53,24 @@ public final class MacProcessInspector: ProcessInspecting, @unchecked Sendable {
     ]
 
     private static let commandLineCoderAliases = [
-        "claude", "claude-code", "opencode", "openclaw", "openclaw-cli", "openclaw-doctor", "hermes", "nanobot"
+        "claude", "claude-code", "codex", "opencode", "openclaw", "openclaw-cli", "openclaw-doctor", "hermes", "nanobot"
     ]
 
     private static func matchProcessName(_ processName: String, whitelist: [String]) -> String? {
         let normalized = normalize(processName)
         return whitelist.map(normalize).first { $0 == normalized }
+    }
+
+    private static func matchCommandExecutable(commandLine: String, whitelist: [String]) -> String? {
+        let normalizedWhitelist = whitelist.map(normalize)
+        for candidate in commandExecutableCandidates(commandLine) {
+            let normalized = normalize(candidate)
+            if let match = normalizedWhitelist.first(where: { $0 == normalized }) {
+                return match
+            }
+        }
+
+        return nil
     }
 
     private static func matchCommandLine(processName: String, commandLine: String, whitelist: [String]) -> String? {
@@ -70,6 +85,42 @@ public final class MacProcessInspector: ProcessInspecting, @unchecked Sendable {
         }
 
         return nil
+    }
+
+    private static func commandExecutableCandidates(_ commandLine: String) -> [String] {
+        let trimmed = commandLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return []
+        }
+
+        let executable: String
+        if let first = trimmed.first, first == "\"" || first == "'" {
+            guard let endIndex = trimmed.dropFirst().firstIndex(of: first) else {
+                return []
+            }
+            executable = String(trimmed[trimmed.index(after: trimmed.startIndex)..<endIndex])
+        } else {
+            let firstToken = String(trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace).first ?? "")
+            guard !firstToken.isEmpty,
+                  !isLikelySpaceTruncatedAppPath(firstToken, commandLine: trimmed)
+            else {
+                return []
+            }
+            executable = firstToken
+        }
+
+        let basename = URL(fileURLWithPath: executable).deletingPathExtension().lastPathComponent
+        return basename.isEmpty ? [] : [basename]
+    }
+
+    private static func isLikelySpaceTruncatedAppPath(_ firstToken: String, commandLine: String) -> Bool {
+        guard commandLine.count > firstToken.count else {
+            return false
+        }
+
+        let remainder = commandLine.dropFirst(firstToken.count)
+        let nextPart = remainder.trimmingCharacters(in: .whitespaces)
+        return nextPart.range(of: #"^[^/\s]+\.app/"#, options: .regularExpression) != nil
     }
 
     private static func commandLineContainsAlias(_ commandLine: String, alias: String) -> Bool {
