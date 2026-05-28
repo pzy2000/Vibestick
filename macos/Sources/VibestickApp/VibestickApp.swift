@@ -26,31 +26,93 @@ struct VibestickMacApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let viewModel = VibestickViewModel()
     private var statusItem: NSStatusItem?
+    private var modeSummaryMenuItem: NSMenuItem?
+    private var taskSummaryMenuItem: NSMenuItem?
+    private var petSummaryMenuItem: NSMenuItem?
+    private var walkingSummaryMenuItem: NSMenuItem?
     private var petToggleMenuItem: NSMenuItem?
+    private var petWalkingMenuItem: NSMenuItem?
+    private var petCardModeMenuItem: NSMenuItem?
+    private var petResetPositionMenuItem: NSMenuItem?
     private var petWindow: PetPanel?
+    private var screenParametersObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        viewModel.menuStateDidChange = { [weak self] in
+            self?.updateStatusItemState()
+        }
         setupStatusItem()
+        screenParametersObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main)
+        { [weak self] _ in
+            Task { @MainActor in
+                self?.petWindow?.screenParametersDidChange()
+                self?.updateStatusItemState()
+            }
+        }
         showPet()
         viewModel.refresh()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+        }
+        screenParametersObserver = nil
         viewModel.shutdown()
     }
 
     private func setupStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Vibestick"
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let menu = NSMenu()
+
+        let modeSummary = disabledMenuItem("")
+        menu.addItem(modeSummary)
+        modeSummaryMenuItem = modeSummary
+
+        let taskSummary = disabledMenuItem("")
+        menu.addItem(taskSummary)
+        taskSummaryMenuItem = taskSummary
+
+        let petSummary = disabledMenuItem("")
+        menu.addItem(petSummary)
+        petSummaryMenuItem = petSummary
+
+        let walkingSummary = disabledMenuItem("")
+        menu.addItem(walkingSummary)
+        walkingSummaryMenuItem = walkingSummary
+
+        menu.addItem(.separator())
+
         let openControlPanel = NSMenuItem(title: "打开控制面板", action: #selector(openControlPanel), keyEquivalent: "")
         openControlPanel.target = self
         menu.addItem(openControlPanel)
+
+        let refresh = NSMenuItem(title: "刷新状态", action: #selector(refreshStatus), keyEquivalent: "")
+        refresh.target = self
+        menu.addItem(refresh)
 
         let petToggle = NSMenuItem(title: "显示桌宠", action: #selector(togglePetAction), keyEquivalent: "")
         petToggle.target = self
         menu.addItem(petToggle)
         petToggleMenuItem = petToggle
+
+        let petWalking = NSMenuItem(title: "", action: #selector(togglePetWalkingAction), keyEquivalent: "")
+        petWalking.target = self
+        menu.addItem(petWalking)
+        petWalkingMenuItem = petWalking
+
+        let petCardMode = NSMenuItem(title: "", action: #selector(cyclePetCardModeAction), keyEquivalent: "")
+        petCardMode.target = self
+        menu.addItem(petCardMode)
+        petCardModeMenuItem = petCardMode
+
+        let resetPosition = NSMenuItem(title: "重置桌宠位置", action: #selector(resetPetPositionAction), keyEquivalent: "")
+        resetPosition.target = self
+        menu.addItem(resetPosition)
+        petResetPositionMenuItem = resetPosition
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
@@ -58,7 +120,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
-        updatePetToggleMenuTitle()
+        updateStatusItemState()
+    }
+
+    private func disabledMenuItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
     }
 
     @objc private func openControlPanel() {
@@ -66,8 +134,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.windows.first { !($0 is PetPanel) }?.makeKeyAndOrderFront(nil)
     }
 
+    @objc private func refreshStatus() {
+        viewModel.refresh()
+    }
+
     @objc private func togglePetAction() {
         togglePet()
+    }
+
+    @objc private func togglePetWalkingAction() {
+        petWindow?.toggleWalking()
+        updateStatusItemState()
+    }
+
+    @objc private func cyclePetCardModeAction() {
+        petWindow?.cycleCardDisplayMode()
+        updateStatusItemState()
+    }
+
+    @objc private func resetPetPositionAction() {
+        petWindow?.resetPetPosition()
+        updateStatusItemState()
     }
 
     private func showPet() {
@@ -76,22 +163,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 viewModel: viewModel,
                 openControlPanel: { [weak self] in self?.openControlPanel() },
                 hidePet: { [weak self] in self?.hidePet() },
-                quitApplication: { [weak self] in self?.quit() })
+                quitApplication: { [weak self] in self?.quit() },
+                menuStateDidChange: { [weak self] in self?.updateStatusItemState() })
         }
         petWindow?.orderFrontRegardless()
         petWindow?.startWalking()
-        updatePetToggleMenuTitle()
+        updateStatusItemState()
     }
 
     private func hidePet() {
         guard let petWindow else {
-            updatePetToggleMenuTitle()
+            updateStatusItemState()
             return
         }
 
         petWindow.close()
         self.petWindow = nil
-        updatePetToggleMenuTitle()
+        updateStatusItemState()
     }
 
     private func togglePet() {
@@ -105,6 +193,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updatePetToggleMenuTitle() {
         petToggleMenuItem?.title = petWindow?.isVisible == true ? "隐藏桌宠" : "显示桌宠"
+    }
+
+    private func updateStatusItemState() {
+        updateStatusIcon()
+        updateSummaryMenuItems()
+        updatePetToggleMenuTitle()
+
+        let petVisible = petWindow?.isVisible == true
+        petWalkingMenuItem?.title = petWindow?.walkingActionTitle ?? (PetPanel.savedWalkingEnabled ? "暂停行走" : "恢复行走")
+        petWalkingMenuItem?.isEnabled = petVisible
+        petCardModeMenuItem?.title = petWindow?.cardDisplayModeActionTitle ?? "切换任务卡"
+        petCardModeMenuItem?.isEnabled = petVisible
+        petResetPositionMenuItem?.isEnabled = petVisible
+    }
+
+    private func updateSummaryMenuItems() {
+        let activeTaskCount = viewModel.activeTaskCount
+        modeSummaryMenuItem?.title = "模式：\(viewModel.menuModeText)"
+        taskSummaryMenuItem?.title = activeTaskCount == 0 ? "任务：无活跃任务" : "任务：\(activeTaskCount) 个活跃任务"
+        petSummaryMenuItem?.title = "桌宠：\(petWindow?.isVisible == true ? "显示" : "隐藏")"
+        walkingSummaryMenuItem?.title = "行走：\((petWindow?.isWalkingEnabled ?? PetPanel.savedWalkingEnabled) ? "行走中" : "暂停")"
+    }
+
+    private func updateStatusIcon() {
+        guard let button = statusItem?.button else {
+            return
+        }
+
+        if let image = statusImage(named: statusSymbolName()) ?? statusImage(named: "circle.fill") {
+            button.image = image
+            button.imagePosition = .imageOnly
+            button.title = ""
+        } else {
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = "V"
+        }
+        button.toolTip = "Vibestick - \(viewModel.menuModeText)"
+    }
+
+    private func statusImage(named symbolName: String) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Vibestick") else {
+            return nil
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private func statusSymbolName() -> String {
+        if viewModel.hasErrorCoder {
+            return "exclamationmark.triangle.fill"
+        }
+        if viewModel.hasWaitingCoder {
+            return "hand.raised.fill"
+        }
+        if viewModel.hasActiveCoderWork {
+            return "terminal.fill"
+        }
+        switch viewModel.menuActiveMode {
+        case .hyper:
+            return "bolt.fill"
+        case .on:
+            return "powerplug.fill"
+        case .off:
+            return "circle.fill"
+        }
     }
 
     @objc private func quit() {
@@ -168,6 +322,8 @@ final class VibestickViewModel: ObservableObject {
     @Published var deviceWatcherStatusText = "正在读取插盘自启状态..."
     @Published var deviceWatcherMessage = ""
     @Published var isInstallingDeviceWatcher = false
+    var menuStateDidChange: (() -> Void)?
+    private(set) var activeTaskCount = 0
 
     private let assertionManager: MacSleepAssertionManager
     private let engine: VibestickMacEngine
@@ -182,6 +338,26 @@ final class VibestickViewModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var coderRefreshTask: Task<Void, Never>?
     private var latestStatus: VibestickStatus?
+
+    var menuActiveMode: VibestickMode {
+        latestStatus?.activeMode ?? .off
+    }
+
+    var menuModeText: String {
+        displayMode(menuActiveMode)
+    }
+
+    var hasErrorCoder: Bool {
+        petMood == "error" || petCoders.contains { $0.phase == .error }
+    }
+
+    var hasWaitingCoder: Bool {
+        petMood == "waiting" || petCoders.contains { $0.phase == .waitingAuthorization }
+    }
+
+    var hasActiveCoderWork: Bool {
+        activeTaskCount > 0
+    }
 
     init(configuration: VibestickAppConfiguration = .fromProcess()) {
         let helper = SubprocessHelperClient(statusRunner: ProcessCommandRunner(timeoutSeconds: 3))
@@ -285,15 +461,18 @@ final class VibestickViewModel: ObservableObject {
         firstLaunchInstallText = formatFirstLaunchStatus(firstLaunchStatus)
         shouldShowFirstLaunchInstall = firstLaunchStatus.location.kind == .mountedVolume || firstLaunchStatus.needsInstall
         canCompleteFirstLaunchInstall = firstLaunchStatus.needsInstall && firstLaunchStatus.canCompleteInstall
+        menuStateDidChange?()
         refreshCoderPet()
     }
 
     private func finishCoderRefresh(coders: [CoderAgentStatus], pet: PetState) {
         coderRefreshTask = nil
+        activeTaskCount = coders.filter { Self.isMenuActivePhase($0.phase) }.count
         petMood = pet.mood
         petTitle = pet.title
         petMessage = pet.message
         petCoders = Array(coders.prefix(3))
+        menuStateDidChange?()
     }
 
     func runDoctor() {
@@ -449,6 +628,15 @@ final class VibestickViewModel: ObservableObject {
             longTasks: [],
             assertionActive: false,
             warnings: [])
+    }
+
+    private static func isMenuActivePhase(_ phase: CoderAgentPhase) -> Bool {
+        switch phase {
+        case .running, .reasoning, .toolCalling, .waitingAuthorization, .error, .success:
+            true
+        case .idle, .sleeping, .offline, .unknown:
+            false
+        }
     }
 
     private func formatStatus(_ status: VibestickStatus, helperPreflight: HelperInstallPreflight) -> String {
@@ -693,6 +881,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private static let walkingEnabledDefaultsKey = "VibestickPetWalkingEnabled"
     private static let originXDefaultsKey = "VibestickPetWindowOriginX"
     private static let originYDefaultsKey = "VibestickPetWindowOriginY"
+    private static let screenIdentifierDefaultsKey = "VibestickPetScreenIdentifier"
     private static let cardDisplayModeDefaultsKey = "VibestickPetCardDisplayMode"
     private static let defaultFrame = NSRect(x: 120, y: 120, width: 356, height: 476)
 
@@ -700,6 +889,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private let openControlPanel: () -> Void
     private let hidePet: () -> Void
     private let quitApplication: () -> Void
+    private let menuStateDidChange: () -> Void
     private let walkingToggleMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let cardDisplayModeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let panelState = PetPanelState(cardDisplayMode: PetPanel.loadCardDisplayMode())
@@ -711,6 +901,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var direction: MacPetCrawlDirection = .left
     private var walkingEnabled = PetPanel.loadWalkingEnabled()
     private var spriteHovering = false
+    private var retainedScreenIdentifier = PetPanel.loadSavedScreenIdentifier()
     private let walkSpeed: CGFloat = 56
     private let bottomMargin: CGFloat = 16
 
@@ -718,12 +909,14 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         viewModel: VibestickViewModel,
         openControlPanel: @escaping () -> Void,
         hidePet: @escaping () -> Void,
-        quitApplication: @escaping () -> Void)
+        quitApplication: @escaping () -> Void,
+        menuStateDidChange: @escaping () -> Void = {})
     {
         self.viewModel = viewModel
         self.openControlPanel = openControlPanel
         self.hidePet = hidePet
         self.quitApplication = quitApplication
+        self.menuStateDidChange = menuStateDidChange
         super.init(
             contentRect: Self.initialFrame(),
             styleMask: [.nonactivatingPanel, .borderless],
@@ -766,6 +959,22 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         isMovableByWindowBackground = false
     }
 
+    static var savedWalkingEnabled: Bool {
+        loadWalkingEnabled()
+    }
+
+    var isWalkingEnabled: Bool {
+        walkingEnabled
+    }
+
+    var walkingActionTitle: String {
+        walkingEnabled ? "暂停行走" : "恢复行走"
+    }
+
+    var cardDisplayModeActionTitle: String {
+        "任务卡：\(panelState.cardDisplayMode.menuLabel)"
+    }
+
     func startWalking() {
         if walkingEnabled {
             alignToWalkLane()
@@ -779,6 +988,51 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         self.displayLink = displayLink
         displayLink.start()
         updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func screenParametersDidChange() {
+        pauseUntil = nil
+        lastTick = nil
+        if walkingEnabled {
+            alignToWalkLane()
+        } else {
+            clampCurrentPosition()
+            saveCurrentPosition()
+        }
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func toggleWalking() {
+        walkingEnabled.toggle()
+        UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
+        pauseUntil = nil
+        lastTick = nil
+
+        if walkingEnabled {
+            alignToWalkLane()
+        }
+
+        updateWalkingMenuText()
+        menuStateDidChange()
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func cycleCardDisplayMode() {
+        setCardDisplayMode(panelState.cardDisplayMode.next)
+    }
+
+    func resetPetPosition() {
+        clearSavedPosition()
+        pauseUntil = nil
+        lastTick = nil
+        setFrameOrigin(Self.clampedFrame(Self.defaultFrame, preferredScreenIdentifier: nil).origin)
+
+        if walkingEnabled {
+            alignToWalkLane()
+        } else {
+            saveCurrentPosition()
+        }
+        menuStateDidChange()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -817,7 +1071,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
         let elapsed = min(now.timeIntervalSince(lastTick ?? now), 0.25)
         lastTick = now
-        guard let screen = screen ?? NSScreen.main else {
+        guard let screen = targetScreen(for: frame, preferRetainedScreen: true) else {
             return
         }
 
@@ -845,6 +1099,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         if walkingEnabled {
             walkingEnabled = false
             UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
+            menuStateDidChange()
         }
         pauseUntil = nil
         lastTick = nil
@@ -853,7 +1108,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func moveManually(to origin: NSPoint) {
-        setFrameOrigin(clampedOrigin(origin))
+        setFrameOrigin(clampedOrigin(origin, preferRetainedScreen: false))
     }
 
     private func finishManualDrag() {
@@ -861,7 +1116,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func alignToWalkLane() {
-        guard let screen = screen ?? NSScreen.main else {
+        guard let screen = targetScreen(for: frame, preferRetainedScreen: true) else {
             return
         }
         var next = frame
@@ -874,10 +1129,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         setFrameOrigin(clampedOrigin(frame.origin))
     }
 
-    private func clampedOrigin(_ origin: NSPoint) -> NSPoint {
+    private func clampedOrigin(_ origin: NSPoint, preferRetainedScreen: Bool = true) -> NSPoint {
         var nextFrame = frame
         nextFrame.origin = origin
-        guard let targetScreen = screen(containing: nextFrame) ?? screen ?? NSScreen.main else {
+        guard let targetScreen = targetScreen(for: nextFrame, preferRetainedScreen: preferRetainedScreen) else {
             return origin
         }
 
@@ -889,8 +1144,14 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             y: min(max(origin.y, visibleFrame.minY), maxY))
     }
 
-    private func screen(containing rect: NSRect) -> NSScreen? {
-        NSScreen.screens.first { $0.visibleFrame.intersects(rect) }
+    private func targetScreen(for rect: NSRect, preferRetainedScreen: Bool) -> NSScreen? {
+        if preferRetainedScreen,
+           let retainedScreenIdentifier,
+           let screen = Self.screen(identifier: retainedScreenIdentifier) {
+            return screen
+        }
+
+        return Self.screen(containing: rect) ?? screen ?? NSScreen.main
     }
 
     private func buildContextMenu() -> NSMenu {
@@ -941,17 +1202,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     @objc private func toggleWalkingFromMenu() {
-        walkingEnabled.toggle()
-        UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
-        pauseUntil = nil
-        lastTick = nil
-
-        if walkingEnabled {
-            alignToWalkLane()
-        }
-
-        updateWalkingMenuText()
-        updateSpritePresentation(at: Date(), force: true)
+        toggleWalking()
     }
 
     @objc private func cycleCardDisplayModeFromMenu() {
@@ -967,11 +1218,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func updateWalkingMenuText() {
-        walkingToggleMenuItem.title = walkingEnabled ? "暂停行走" : "恢复行走"
-    }
-
-    private func cycleCardDisplayMode() {
-        setCardDisplayMode(panelState.cardDisplayMode.next)
+        walkingToggleMenuItem.title = walkingActionTitle
     }
 
     private func adjustCardDisplayMode(scrollDeltaY: CGFloat) {
@@ -993,6 +1240,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         panelState.cardDisplayMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.cardDisplayModeDefaultsKey)
         updateCardDisplayModeMenuText()
+        menuStateDidChange()
     }
 
     private func updateCardDisplayModeMenuText() {
@@ -1000,16 +1248,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     @objc private func resetPetPositionFromMenu() {
-        clearSavedPosition()
-        pauseUntil = nil
-        lastTick = nil
-
-        if walkingEnabled {
-            alignToWalkLane()
-        } else {
-            setFrameOrigin(clampedOrigin(Self.defaultFrame.origin))
-            saveCurrentPosition()
-        }
+        resetPetPosition()
     }
 
     private static func loadWalkingEnabled() -> Bool {
@@ -1027,10 +1266,11 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     private static func initialFrame() -> NSRect {
         var frame = defaultFrame
+        let screenIdentifier = loadSavedScreenIdentifier()
         if let savedOrigin = loadSavedOrigin() {
             frame.origin = savedOrigin
         }
-        return frame
+        return clampedFrame(frame, preferredScreenIdentifier: screenIdentifier)
     }
 
     private static func loadSavedOrigin() -> NSPoint? {
@@ -1046,16 +1286,73 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             y: defaults.double(forKey: originYDefaultsKey))
     }
 
+    private static func loadSavedScreenIdentifier() -> String? {
+        UserDefaults.standard.string(forKey: screenIdentifierDefaultsKey)
+    }
+
+    private static func clampedFrame(_ frame: NSRect, preferredScreenIdentifier: String?) -> NSRect {
+        var next = frame
+        guard let targetScreen = screen(identifier: preferredScreenIdentifier) ?? screen(containing: frame) ?? NSScreen.main else {
+            return next
+        }
+
+        let visibleFrame = targetScreen.visibleFrame
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - next.width)
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - next.height)
+        next.origin = NSPoint(
+            x: min(max(next.origin.x, visibleFrame.minX), maxX),
+            y: min(max(next.origin.y, visibleFrame.minY), maxY))
+        return next
+    }
+
+    private static func screen(identifier: String?) -> NSScreen? {
+        guard let identifier else {
+            return nil
+        }
+        return NSScreen.screens.first { screenIdentifier(for: $0) == identifier }
+    }
+
+    private static func screen(containing rect: NSRect) -> NSScreen? {
+        NSScreen.screens
+            .map { screen in (screen, intersectionArea(screen.visibleFrame, rect)) }
+            .filter { $0.1 > 0 }
+            .max { lhs, rhs in lhs.1 < rhs.1 }?
+            .0
+    }
+
+    private static func screenIdentifier(for screen: NSScreen?) -> String? {
+        guard let value = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return value.stringValue
+    }
+
+    private static func intersectionArea(_ lhs: NSRect, _ rhs: NSRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else {
+            return 0
+        }
+        return intersection.width * intersection.height
+    }
+
     private func saveCurrentPosition() {
         let defaults = UserDefaults.standard
         defaults.set(Double(frame.origin.x), forKey: Self.originXDefaultsKey)
         defaults.set(Double(frame.origin.y), forKey: Self.originYDefaultsKey)
+        retainedScreenIdentifier = Self.screenIdentifier(for: Self.screen(containing: frame) ?? screen)
+        if let retainedScreenIdentifier {
+            defaults.set(retainedScreenIdentifier, forKey: Self.screenIdentifierDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.screenIdentifierDefaultsKey)
+        }
     }
 
     private func clearSavedPosition() {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: Self.originXDefaultsKey)
         defaults.removeObject(forKey: Self.originYDefaultsKey)
+        defaults.removeObject(forKey: Self.screenIdentifierDefaultsKey)
+        retainedScreenIdentifier = nil
     }
 
     private func setSpriteHovering(_ hovering: Bool) {
