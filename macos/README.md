@@ -114,6 +114,12 @@ Development bundle:
 scripts/build-release.sh dev
 ```
 
+Development drag-to-install DMG:
+
+```bash
+scripts/build-dmg.sh dev
+```
+
 Notarized release package:
 
 ```bash
@@ -122,3 +128,17 @@ export DEVELOPER_ID_INSTALLER="Developer ID Installer: ..."
 export NOTARY_PROFILE="vibestick-notary"
 scripts/build-release.sh release
 ```
+
+Notarized drag-to-install DMG:
+
+```bash
+export DEVELOPER_ID_APPLICATION="Developer ID Application: ..."
+export NOTARY_PROFILE="vibestick-notary"
+scripts/build-dmg.sh release
+```
+
+The DMG contains `Vibestick.app` and an `Applications` shortcut. Drag the app
+to Applications, then open it from Applications. First launch shows a
+"complete install" prompt for the privileged helper and the user LaunchAgent.
+Opening the app directly from `/Volumes/...` disables that action because the
+helper and LaunchAgent must point at the installed app bundle.

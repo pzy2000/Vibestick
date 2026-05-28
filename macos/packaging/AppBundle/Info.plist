@@ -11,6 +11,8 @@
   <string>Vibestick</string>
   <key>CFBundleDisplayName</key>
   <string>Vibestick</string>
+  <key>CFBundleIconFile</key>
+  <string>Vibestick</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

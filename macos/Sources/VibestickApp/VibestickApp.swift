@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        viewModel.stopHyperAssertion()
+        viewModel.shutdown()
     }
 
     private func setupStatusItem() {
@@ -112,6 +112,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+struct VibestickAppConfiguration {
+    let coderStatusDirectory: URL
+    let codexSessionsRoot: URL
+    let enableCodexMonitor: Bool
+
+    static func fromProcess(
+        arguments: [String] = Array(CommandLine.arguments.dropFirst()),
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> VibestickAppConfiguration {
+        let statusPath = option("--status-dir", in: arguments) ?? environment["VIBESTICK_CODER_STATUS_DIR"]
+        let sessionsPath = option("--codex-sessions-dir", in: arguments) ?? environment["VIBESTICK_CODEX_SESSIONS_DIR"]
+        return VibestickAppConfiguration(
+            coderStatusDirectory: statusPath.map { URL(fileURLWithPath: $0) } ?? VibestickPaths.coderStatusDirectory,
+            codexSessionsRoot: sessionsPath.map { URL(fileURLWithPath: $0) } ?? CodexSessionPaths.defaultSessionsRoot,
+            enableCodexMonitor: !hasFlag("--no-codex-monitor", in: arguments))
+    }
+
+    private static func option(_ name: String, in arguments: [String]) -> String? {
+        for index in arguments.indices {
+            let value = arguments[index]
+            if value == name,
+               arguments.indices.contains(arguments.index(after: index)) {
+                return arguments[arguments.index(after: index)]
+            }
+
+            let prefix = "\(name)="
+            if value.hasPrefix(prefix) {
+                return String(value.dropFirst(prefix.count))
+            }
+        }
+
+        return nil
+    }
+
+    private static func hasFlag(_ name: String, in arguments: [String]) -> Bool {
+        arguments.contains(name)
+    }
+}
+
 @MainActor
 final class VibestickViewModel: ObservableObject {
     @Published var statusText = "正在读取状态..."
@@ -122,6 +161,10 @@ final class VibestickViewModel: ObservableObject {
     @Published var petCoders: [CoderAgentStatus] = []
     @Published var helperInstallMessage = ""
     @Published var isInstallingHelper = false
+    @Published var firstLaunchInstallText = ""
+    @Published var shouldShowFirstLaunchInstall = false
+    @Published var canCompleteFirstLaunchInstall = false
+    @Published var isCompletingFirstLaunchInstall = false
     @Published var deviceWatcherStatusText = "正在读取插盘自启状态..."
     @Published var deviceWatcherMessage = ""
     @Published var isInstallingDeviceWatcher = false
@@ -129,21 +172,31 @@ final class VibestickViewModel: ObservableObject {
     private let assertionManager: MacSleepAssertionManager
     private let engine: VibestickMacEngine
     private let doctor: MacDoctorService
+    private let firstLaunchInstaller: FirstLaunchInstaller
     private let helperInstaller: HelperInstalling
     private let deviceWatcherInstaller: DeviceWatcherInstalling
     private let coderSource: CompositeCoderStatusSource
+    private let codexStatusBridge: CodexSessionStatusBridge?
     private let petResolver = PetStateResolver()
     private var refreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
+    private var coderRefreshTask: Task<Void, Never>?
+    private var latestStatus: VibestickStatus?
 
-    init() {
-        let helper = SubprocessHelperClient()
+    init(configuration: VibestickAppConfiguration = .fromProcess()) {
+        let helper = SubprocessHelperClient(statusRunner: ProcessCommandRunner(timeoutSeconds: 3))
         let battery = MacBatteryMonitor()
         let processInspector = MacProcessInspector()
         let assertionManager = MacSleepAssertionManager()
+        let helperInstaller = MacHelperInstaller()
+        let deviceWatcherInstaller = MacDeviceWatcherInstaller()
         self.assertionManager = assertionManager
-        self.helperInstaller = MacHelperInstaller()
-        self.deviceWatcherInstaller = MacDeviceWatcherInstaller()
+        self.helperInstaller = helperInstaller
+        self.deviceWatcherInstaller = deviceWatcherInstaller
+        self.firstLaunchInstaller = FirstLaunchInstaller(
+            appPath: Bundle.main.bundleURL.path,
+            helperInstaller: helperInstaller,
+            deviceWatcherInstaller: deviceWatcherInstaller)
         self.engine = VibestickMacEngine(
             helper: helper,
             battery: battery,
@@ -154,11 +207,16 @@ final class VibestickViewModel: ObservableObject {
             battery: battery,
             processInspector: processInspector,
             assertionManager: assertionManager)
+        self.codexStatusBridge = configuration.enableCodexMonitor
+            ? CodexSessionStatusBridge(
+                statusDirectory: configuration.coderStatusDirectory,
+                sessionsRoot: configuration.codexSessionsRoot)
+            : nil
         self.coderSource = CompositeCoderStatusSource([
-            JsonFileCoderStatusSource(),
-            CodexSessionStatusSource(),
+            JsonFileCoderStatusSource(directory: configuration.coderStatusDirectory),
             ProcessCoderStatusSource(processInspector: processInspector, processNames: VibestickOptions().longTaskProcessNames)
         ])
+        self.codexStatusBridge?.start()
         self.refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
@@ -167,6 +225,29 @@ final class VibestickViewModel: ObservableObject {
     }
 
     func refresh() {
+        refreshCoderPet()
+        refreshSystemStatus()
+    }
+
+    private func refreshCoderPet() {
+        guard coderRefreshTask == nil else {
+            return
+        }
+
+        let coderSource = coderSource
+        let petResolver = petResolver
+        let status = latestStatus ?? Self.defaultPetStatus()
+        coderRefreshTask = Task.detached(priority: .utility) { [weak self] in
+            let coders = coderSource.getStatuses(now: Date())
+            let pet = petResolver.resolve(status: status, coders: coders)
+
+            await MainActor.run {
+                self?.finishCoderRefresh(coders: coders, pet: pet)
+            }
+        }
+    }
+
+    private func refreshSystemStatus() {
         guard refreshTask == nil else {
             return
         }
@@ -174,36 +255,41 @@ final class VibestickViewModel: ObservableObject {
         let engine = engine
         let helperInstaller = helperInstaller
         let deviceWatcherInstaller = deviceWatcherInstaller
-        let coderSource = coderSource
-        let petResolver = petResolver
+        let firstLaunchInstaller = firstLaunchInstaller
         refreshTask = Task.detached(priority: .utility) { [weak self] in
             let status = engine.status()
             let helperPreflight = helperInstaller.preflight()
             let deviceWatcherStatus = deviceWatcherInstaller.status()
-            let coders = coderSource.getStatuses(now: Date())
-            let pet = petResolver.resolve(status: status, coders: coders)
+            let firstLaunchStatus = firstLaunchInstaller.status()
 
             await MainActor.run {
-                self?.finishRefresh(
+                self?.finishSystemRefresh(
                     status: status,
                     helperPreflight: helperPreflight,
                     deviceWatcherStatus: deviceWatcherStatus,
-                    coders: coders,
-                    pet: pet)
+                    firstLaunchStatus: firstLaunchStatus)
             }
         }
     }
 
-    private func finishRefresh(
+    private func finishSystemRefresh(
         status: VibestickStatus,
         helperPreflight: HelperInstallPreflight,
         deviceWatcherStatus: DeviceWatcherInstallStatus,
-        coders: [CoderAgentStatus],
-        pet: PetState)
+        firstLaunchStatus: FirstLaunchInstallStatus)
     {
         refreshTask = nil
+        latestStatus = status
         statusText = formatStatus(status, helperPreflight: helperPreflight)
         deviceWatcherStatusText = formatDeviceWatcherStatus(deviceWatcherStatus)
+        firstLaunchInstallText = formatFirstLaunchStatus(firstLaunchStatus)
+        shouldShowFirstLaunchInstall = firstLaunchStatus.location.kind == .mountedVolume || firstLaunchStatus.needsInstall
+        canCompleteFirstLaunchInstall = firstLaunchStatus.needsInstall && firstLaunchStatus.canCompleteInstall
+        refreshCoderPet()
+    }
+
+    private func finishCoderRefresh(coders: [CoderAgentStatus], pet: PetState) {
+        coderRefreshTask = nil
         petMood = pet.mood
         petTitle = pet.title
         petMessage = pet.message
@@ -236,6 +322,17 @@ final class VibestickViewModel: ObservableObject {
         refresh()
     }
 
+    func shutdown() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        coderRefreshTask?.cancel()
+        coderRefreshTask = nil
+        codexStatusBridge?.stop()
+        assertionManager.endHyperAssertion()
+    }
+
     func requestAccessibility() {
         _ = AccessibilityStatus.isTrusted(prompt: true)
     }
@@ -261,6 +358,35 @@ final class VibestickViewModel: ObservableObject {
                 case .failure(let error):
                     self.helperInstallMessage = error.localizedDescription
                     self.runDoctor()
+                }
+            }
+        }
+    }
+
+    func completeFirstLaunchInstall() {
+        guard !isCompletingFirstLaunchInstall else {
+            return
+        }
+
+        isCompletingFirstLaunchInstall = true
+        firstLaunchInstallText = "正在完成 Helper 和插盘自启安装..."
+        let installer = firstLaunchInstaller
+
+        Task.detached {
+            let result = Result { try installer.completeInstall() }
+            await MainActor.run {
+                self.isCompletingFirstLaunchInstall = false
+                switch result {
+                case .success(let installResult):
+                    self.firstLaunchInstallText = installResult.message
+                    self.helperInstallMessage = installResult.message
+                    self.deviceWatcherMessage = installResult.message
+                    self.refresh()
+                    self.runDoctor()
+                case .failure(let error):
+                    self.firstLaunchInstallText = error.localizedDescription
+                    self.runDoctor()
+                    self.refresh()
                 }
             }
         }
@@ -312,6 +438,17 @@ final class VibestickViewModel: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    private static func defaultPetStatus() -> VibestickStatus {
+        VibestickStatus(
+            activeMode: .off,
+            restorePending: false,
+            pmset: nil,
+            battery: BatteryInfo(percentage: nil, isACConnected: false, isAvailable: false),
+            longTasks: [],
+            assertionActive: false,
+            warnings: [])
     }
 
     private func formatStatus(_ status: VibestickStatus, helperPreflight: HelperInstallPreflight) -> String {
@@ -407,6 +544,27 @@ final class VibestickViewModel: ObservableObject {
         }
         return message
     }
+
+    private func formatFirstLaunchStatus(_ status: FirstLaunchInstallStatus) -> String {
+        switch status.location.kind {
+        case .mountedVolume:
+            return "请先把 Vibestick 拖到 Applications 后再打开，才能完成 Helper 和插盘自启安装。"
+        case .other:
+            return "请把 Vibestick.app 移到 Applications 后再完成安装。"
+        case .systemApplications, .userApplications:
+            break
+        }
+
+        if !status.needsInstall {
+            return "Vibestick 安装已完成。"
+        }
+
+        if !status.canCompleteInstall {
+            return "安装资源缺失，请重新构建或重新下载 Vibestick。"
+        }
+
+        return "还需完成：\(status.missingComponentNames.joined(separator: "、"))。点击“完成安装”后会先请求管理员授权安装 Helper，再启用插盘自启。"
+    }
 }
 
 struct ControlPanelView: View {
@@ -414,6 +572,20 @@ struct ControlPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if viewModel.shouldShowFirstLaunchInstall {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(viewModel.firstLaunchInstallText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button(viewModel.isCompletingFirstLaunchInstall ? "安装中..." : "完成安装") {
+                        viewModel.completeFirstLaunchInstall()
+                    }
+                    .disabled(!viewModel.canCompleteFirstLaunchInstall || viewModel.isCompletingFirstLaunchInstall)
+                }
+                .padding(.bottom, 4)
+
+                Divider()
+            }
+
             HStack {
                 Button("关闭") { viewModel.apply(.off) }
                 Button("保持唤醒") { viewModel.apply(.on) }

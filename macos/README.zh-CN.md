@@ -110,6 +110,12 @@ LaunchAgent plist 和日志：
 scripts/build-release.sh dev
 ```
 
+开发版拖拽安装 DMG：
+
+```bash
+scripts/build-dmg.sh dev
+```
+
 已公证 release 包：
 
 ```bash
@@ -118,3 +124,16 @@ export DEVELOPER_ID_INSTALLER="Developer ID Installer: ..."
 export NOTARY_PROFILE="vibestick-notary"
 scripts/build-release.sh release
 ```
+
+已公证拖拽安装 DMG：
+
+```bash
+export DEVELOPER_ID_APPLICATION="Developer ID Application: ..."
+export NOTARY_PROFILE="vibestick-notary"
+scripts/build-dmg.sh release
+```
+
+DMG 内包含 `Vibestick.app` 和 `Applications` 快捷方式。把 app 拖到
+Applications 后再从 Applications 打开；首次启动会显示“完成安装”入口，按顺序安装
+特权 Helper 和用户级插盘自启 LaunchAgent。直接从 `/Volumes/...` 打开时不会启用该
+动作，因为 Helper 和 LaunchAgent 必须指向已安装的 app bundle。

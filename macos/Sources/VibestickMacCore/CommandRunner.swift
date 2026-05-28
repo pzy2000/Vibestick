@@ -6,12 +6,15 @@ public protocol CommandRunning: Sendable {
 
 public enum CommandRunError: Error, LocalizedError {
     case failedToStart(String)
+    case timedOut(String)
     case nonZero(CommandResult)
 
     public var errorDescription: String? {
         switch self {
         case .failedToStart(let executable):
             return "Failed to start \(executable)."
+        case .timedOut(let executable):
+            return "Command timed out: \(executable)."
         case .nonZero(let result):
             let detail = [result.standardOutput, result.standardError]
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -23,7 +26,11 @@ public enum CommandRunError: Error, LocalizedError {
 }
 
 public final class ProcessCommandRunner: CommandRunning, @unchecked Sendable {
-    public init() {}
+    private let timeoutSeconds: TimeInterval?
+
+    public init(timeoutSeconds: TimeInterval? = nil) {
+        self.timeoutSeconds = timeoutSeconds
+    }
 
     public func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
         let process = Process()
@@ -41,7 +48,21 @@ public final class ProcessCommandRunner: CommandRunning, @unchecked Sendable {
             throw CommandRunError.failedToStart(executable)
         }
 
-        process.waitUntilExit()
+        if let timeoutSeconds {
+            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+
+            if process.isRunning {
+                process.terminate()
+                process.waitUntilExit()
+                throw CommandRunError.timedOut(executable)
+            }
+        } else {
+            process.waitUntilExit()
+        }
+
         let outData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errData = stderr.fileHandleForReading.readDataToEndOfFile()
 

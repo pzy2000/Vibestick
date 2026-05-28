@@ -607,3 +607,265 @@ public final class CodexSessionStatusSource: CoderStatusSourcing, @unchecked Sen
         let status: CoderAgentStatus?
     }
 }
+
+public final class CodexSessionStatusBridge: @unchecked Sendable {
+    private static let recentSessionWindow: TimeInterval = 12 * 60 * 60
+    private static let maxTrackedSessions = 12
+    private static let activeSessionTtlSeconds = 300
+
+    private let sessionsRoot: URL
+    private let fileManager: FileManager
+    private let writer: CoderStatusWriter
+    private let clock: @Sendable () -> Date
+    private let refreshInterval: TimeInterval
+    private let queue = DispatchQueue(label: "com.pzy.vibestick.codex-session-status-bridge")
+    private var timer: DispatchSourceTimer?
+    private var running = false
+    private var trackedSessions: [String: TrackedCodexSession] = [:]
+    private var lastActiveSessionPaths: [String] = []
+
+    public init(
+        statusDirectory: URL = VibestickPaths.coderStatusDirectory,
+        sessionsRoot: URL = CodexSessionPaths.defaultSessionsRoot,
+        fileManager: FileManager = .default,
+        refreshInterval: TimeInterval = 1,
+        clock: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.sessionsRoot = sessionsRoot
+        self.fileManager = fileManager
+        self.writer = CoderStatusWriter(directory: statusDirectory)
+        self.refreshInterval = refreshInterval
+        self.clock = clock
+    }
+
+    deinit {
+        stop()
+    }
+
+    public var isRunning: Bool {
+        queue.sync {
+            running
+        }
+    }
+
+    public var activeSessionPath: String? {
+        queue.sync {
+            lastActiveSessionPaths.first
+        }
+    }
+
+    public var activeSessionPaths: [String] {
+        queue.sync {
+            lastActiveSessionPaths
+        }
+    }
+
+    public func start() {
+        queue.sync {
+            guard !running else {
+                return
+            }
+
+            running = true
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            let intervalMilliseconds = max(100, Int(refreshInterval * 1_000))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(intervalMilliseconds))
+            timer.setEventHandler { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.refreshOnQueue(now: self.clock())
+            }
+            self.timer = timer
+            timer.resume()
+        }
+    }
+
+    public func stop() {
+        queue.sync {
+            timer?.cancel()
+            timer = nil
+            running = false
+        }
+    }
+
+    public func refresh(now: Date = Date()) {
+        queue.sync {
+            refreshOnQueue(now: now)
+        }
+    }
+
+    private func refreshOnQueue(now: Date) {
+        let files = findRecentSessionFiles(now: now)
+        let currentPaths = Set(files.map(\.url.path))
+        trackedSessions = trackedSessions.filter { currentPaths.contains($0.key) }
+
+        var activePaths: [String] = []
+        for file in files {
+            var session = trackedSessions[file.url.path] ?? TrackedCodexSession(
+                url: file.url,
+                modifiedAt: file.modifiedAt,
+                fileSize: file.fileSize)
+            session.modifiedAt = file.modifiedAt
+            session.fileSize = file.fileSize
+
+            if refresh(session: &session, now: now) {
+                activePaths.append(session.url.path)
+            }
+            trackedSessions[file.url.path] = session
+        }
+        lastActiveSessionPaths = activePaths
+    }
+
+    private func findRecentSessionFiles(now: Date) -> [(url: URL, modifiedAt: Date, fileSize: UInt64)] {
+        guard let enumerator = fileManager.enumerator(
+            at: sessionsRoot,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
+        ) else {
+            return []
+        }
+
+        let cutoff = now.addingTimeInterval(-Self.recentSessionWindow)
+        var files: [(url: URL, modifiedAt: Date, fileSize: UInt64)] = []
+
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent.hasPrefix("rollout-"),
+                  url.pathExtension == "jsonl",
+                  let values = try? url.resourceValues(forKeys: [
+                      .contentModificationDateKey,
+                      .fileSizeKey,
+                      .isRegularFileKey
+                  ]),
+                  values.isRegularFile != false,
+                  let modifiedAt = values.contentModificationDate,
+                  let fileSize = values.fileSize,
+                  modifiedAt >= cutoff
+            else {
+                continue
+            }
+            files.append((url, modifiedAt, UInt64(max(fileSize, 0))))
+        }
+
+        return files
+            .sorted {
+                if $0.modifiedAt != $1.modifiedAt {
+                    return $0.modifiedAt > $1.modifiedAt
+                }
+                return $0.url.path.localizedCaseInsensitiveCompare($1.url.path) == .orderedDescending
+            }
+            .prefix(Self.maxTrackedSessions)
+            .map { $0 }
+    }
+
+    private func refresh(session: inout TrackedCodexSession, now: Date) -> Bool {
+        if session.fileSize < session.position {
+            session.position = 0
+        }
+
+        guard session.fileSize > session.position,
+              let contents = readNewContents(from: session.url, offset: session.position)
+        else {
+            return false
+        }
+
+        session.position = session.fileSize
+
+        var latestUpdate: CodexSessionStatusUpdate?
+        var latestTimestamp = now
+        for line in contents.components(separatedBy: .newlines) {
+            if let metadata = CodexSessionEventMapper.readSessionMetadata(line) {
+                if session.sessionId == nil {
+                    session.sessionId = metadata.sessionId
+                }
+                if session.workspace == nil {
+                    session.workspace = metadata.workspace
+                }
+            }
+
+            if session.taskSummary == nil,
+               let summary = CodexSessionEventMapper.readTaskSummary(line) {
+                session.taskSummary = summary
+            }
+
+            if let detail = CodexSessionEventMapper.readTaskDetail(line) {
+                session.taskDetail = detail
+            }
+
+            if let update = CodexSessionEventMapper.mapJsonLine(line) {
+                latestUpdate = update
+                latestTimestamp = CodexSessionEventMapper.readTimestamp(line) ?? now
+            }
+        }
+
+        guard let latestUpdate else {
+            return false
+        }
+
+        let ttlSeconds = bridgeTtlSeconds(for: latestUpdate)
+        guard latestTimestamp.addingTimeInterval(TimeInterval(ttlSeconds)) >= now else {
+            return false
+        }
+
+        do {
+            _ = try writer.emit(
+                agent: "codex",
+                phase: latestUpdate.phase,
+                message: latestUpdate.message,
+                workspace: session.workspace,
+                processId: nil,
+                ttlSeconds: ttlSeconds,
+                sessionId: session.sessionId ?? session.url.deletingPathExtension().lastPathComponent,
+                taskSummary: session.taskSummary ?? fallbackSummary(workspace: session.workspace),
+                sourcePath: session.url.path,
+                taskDetail: session.taskDetail,
+                updatedAtUtc: latestTimestamp)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func readNewContents(from url: URL, offset: UInt64) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer {
+            try? handle.close()
+        }
+
+        do {
+            try handle.seek(toOffset: offset)
+            guard let data = try handle.readToEnd() else {
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    private func bridgeTtlSeconds(for update: CodexSessionStatusUpdate) -> Int {
+        update.phase == .success ? update.ttlSeconds : max(update.ttlSeconds, Self.activeSessionTtlSeconds)
+    }
+
+    private func fallbackSummary(workspace: String?) -> String {
+        guard let workspace else {
+            return "Codex task"
+        }
+
+        let trimmed = workspace.trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+        let workspaceName = URL(fileURLWithPath: trimmed).lastPathComponent
+        return workspaceName.isEmpty ? "Codex task" : "Codex task in \(workspaceName)"
+    }
+
+    private struct TrackedCodexSession {
+        let url: URL
+        var modifiedAt: Date
+        var fileSize: UInt64
+        var position: UInt64 = 0
+        var sessionId: String?
+        var workspace: String?
+        var taskSummary: String?
+        var taskDetail: String?
+    }
+}

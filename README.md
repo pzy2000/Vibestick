@@ -163,6 +163,12 @@ Build a development `.app` bundle:
 macos/scripts/build-release.sh dev
 ```
 
+Build a development drag-to-install `.dmg`:
+
+```bash
+macos/scripts/build-dmg.sh dev
+```
+
 Install the helper for local privileged `pmset` control:
 
 ```bash
@@ -185,6 +191,18 @@ export DEVELOPER_ID_INSTALLER="Developer ID Installer: ..."
 export NOTARY_PROFILE="vibestick-notary"
 macos/scripts/build-release.sh release
 ```
+
+For DMG distribution, run:
+
+```bash
+export DEVELOPER_ID_APPLICATION="Developer ID Application: ..."
+export NOTARY_PROFILE="vibestick-notary"
+macos/scripts/build-dmg.sh release
+```
+
+The DMG installs by dragging `Vibestick.app` to Applications. First launch from
+Applications completes the privileged helper and device-watcher LaunchAgent
+setup; direct launch from `/Volumes/...` asks the user to copy the app first.
 
 `doctor` only reports verifiable local state: helper availability, helper
 communication, `pmset`, restore state, battery, Vibestick assertion,

@@ -155,6 +155,12 @@ helper 备份状态保存于：
 macos/scripts/build-release.sh dev
 ```
 
+构建开发版拖拽安装 `.dmg`：
+
+```bash
+macos/scripts/build-dmg.sh dev
+```
+
 安装 helper 以启用本地特权 `pmset` 控制：
 
 ```bash
@@ -177,5 +183,17 @@ export DEVELOPER_ID_INSTALLER="Developer ID Installer: ..."
 export NOTARY_PROFILE="vibestick-notary"
 macos/scripts/build-release.sh release
 ```
+
+如果要发布拖拽安装 DMG：
+
+```bash
+export DEVELOPER_ID_APPLICATION="Developer ID Application: ..."
+export NOTARY_PROFILE="vibestick-notary"
+macos/scripts/build-dmg.sh release
+```
+
+DMG 通过把 `Vibestick.app` 拖到 Applications 完成复制安装。首次从
+Applications 打开后，应用会继续完成特权 Helper 和插盘自启 LaunchAgent 安装；如果
+直接从 `/Volumes/...` 打开，则会提示先复制 app。
 
 `doctor` 只报告可验证的本地状态：helper 可用性、helper 通信、`pmset`、恢复状态、电池、Vibestick assertion、Accessibility 授权和长时间运行的 coder 任务。

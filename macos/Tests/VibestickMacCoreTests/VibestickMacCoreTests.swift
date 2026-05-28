@@ -190,6 +190,48 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(runner.invocations.first, [VibestickPaths.installedHelperPath, "--json", "status"])
     }
 
+    func testSubprocessHelperClientUsesSeparateStatusRunner() throws {
+        let mutationRunner = FakeRunner()
+        mutationRunner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+            {
+              "requested_mode": "on",
+              "applied_mode": "on",
+              "restore_pending": true,
+              "warnings": [],
+              "message": "ON mode applied."
+            }
+            """,
+            standardError: "")
+        let statusRunner = FakeRunner()
+        statusRunner.forcedResult = CommandResult(
+            exitCode: 0,
+            standardOutput: """
+            {
+              "ok": true,
+              "snapshot": null,
+              "backup": null,
+              "state_path": "/tmp/vibestick-state.json"
+            }
+            """,
+            standardError: "")
+        let client = SubprocessHelperClient(
+            helperPath: "/tmp/helper",
+            runner: mutationRunner,
+            statusRunner: statusRunner,
+            authorizeMutatingCommands: false)
+
+        let status = try client.status()
+        XCTAssertTrue(status.ok)
+        XCTAssertEqual(statusRunner.invocations, [["/tmp/helper", "--json", "status"]])
+        XCTAssertEqual(mutationRunner.invocations, [])
+
+        _ = try client.applyOn()
+        XCTAssertEqual(mutationRunner.invocations, [["/tmp/helper", "--json", "apply-on"]])
+        XCTAssertEqual(statusRunner.invocations, [["/tmp/helper", "--json", "status"]])
+    }
+
     func testSubprocessHelperClientUnwrapsPrivilegedHelperJsonError() {
         let runner = FakeRunner()
         runner.forcedResult = CommandResult(
@@ -401,6 +443,49 @@ final class VibestickMacCoreTests: XCTestCase {
             "codex")
     }
 
+    func testPetStateResolverMapsActiveCoderPhasesToSpecificMoods() {
+        let resolver = PetStateResolver()
+        let status = vibestickStatus()
+
+        XCTAssertEqual(
+            resolver.resolve(status: status, coders: [coderStatus(phase: .toolCalling)]).mood,
+            "tool_calling")
+        XCTAssertEqual(
+            resolver.resolve(status: status, coders: [coderStatus(phase: .waitingAuthorization)]).mood,
+            "waiting")
+        XCTAssertEqual(
+            resolver.resolve(status: status, coders: [coderStatus(phase: .success)]).mood,
+            "success")
+        XCTAssertEqual(
+            resolver.resolve(status: status, coders: [coderStatus(phase: .error)]).mood,
+            "error")
+    }
+
+    func testPetStateResolverUsesLowBatteryMoodWhenNoCoderIsActive() {
+        let resolver = PetStateResolver()
+        let lowBattery = vibestickStatus(
+            battery: BatteryInfo(percentage: 20, isACConnected: false, isAvailable: true))
+        let chargingLowBattery = vibestickStatus(
+            battery: BatteryInfo(percentage: 10, isACConnected: true, isAvailable: true))
+
+        XCTAssertEqual(resolver.resolve(status: lowBattery, coders: []).mood, "low_battery")
+        XCTAssertEqual(resolver.resolve(status: chargingLowBattery, coders: []).mood, "idle")
+    }
+
+    func testPetStateResolverKeepsActiveWorkAndHyperAboveLowBattery() {
+        let resolver = PetStateResolver()
+        let lowBattery = vibestickStatus(
+            battery: BatteryInfo(percentage: 10, isACConnected: false, isAvailable: true))
+        let hyperLowBattery = vibestickStatus(
+            activeMode: .hyper,
+            battery: BatteryInfo(percentage: 10, isACConnected: false, isAvailable: true))
+
+        XCTAssertEqual(
+            resolver.resolve(status: lowBattery, coders: [coderStatus(phase: .toolCalling)]).mood,
+            "tool_calling")
+        XCTAssertEqual(resolver.resolve(status: hyperLowBattery, coders: []).mood, "power")
+    }
+
     func testCompositeCoderStatusSourcePreservesMultipleSessionsForSameAgent() {
         let now = Date()
         let source = CompositeCoderStatusSource([
@@ -524,6 +609,106 @@ final class VibestickMacCoreTests: XCTestCase {
         let source = CodexSessionStatusSource(sessionsRoot: sessionsRoot)
 
         XCTAssertEqual(source.getStatuses(now: now), [])
+    }
+
+    func testCodexSessionStatusBridgeWritesCodexJsonForNewRollout() throws {
+        let statusDirectory = temporaryDirectory()
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        let timestamp = isoTimestamp(now.addingTimeInterval(-5))
+        let sessionPath = try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now,
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/Users/pzy/Desktop/Vibestick"}}
+            {"type":"event_msg","payload":{"type":"user_message","message":"请修复 Mac Codex 任务状态"}}
+            {"type":"event_msg","payload":{"type":"agent_message","message":"Reading Mac bridge code"}}
+            {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"function_call","name":"shell_command"}}
+            """)
+        let bridge = CodexSessionStatusBridge(statusDirectory: statusDirectory, sessionsRoot: sessionsRoot)
+
+        bridge.refresh(now: now)
+
+        let statusPath = statusDirectory.appendingPathComponent("codex-session-a.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: statusPath.path))
+        let statuses = JsonFileCoderStatusSource(directory: statusDirectory).getStatuses(now: now)
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0].agent, "codex")
+        XCTAssertEqual(statuses[0].phase, .toolCalling)
+        XCTAssertEqual(statuses[0].message, "Using shell_command")
+        XCTAssertEqual(statuses[0].workspace, "/Users/pzy/Desktop/Vibestick")
+        XCTAssertEqual(statuses[0].sessionId, "session-a")
+        XCTAssertEqual(statuses[0].taskSummary, "修复 Mac Codex 任务状态")
+        XCTAssertEqual(statuses[0].taskDetail, "Reading Mac bridge code")
+        XCTAssertEqual(
+            URL(fileURLWithPath: try XCTUnwrap(statuses[0].sourcePath)).standardizedFileURL.path,
+            sessionPath.standardizedFileURL.path)
+    }
+
+    func testCodexSessionStatusBridgePreservesMultipleActiveSessions() throws {
+        let statusDirectory = temporaryDirectory()
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        let firstTimestamp = isoTimestamp(now.addingTimeInterval(-8))
+        let secondTimestamp = isoTimestamp(now.addingTimeInterval(-4))
+        try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now.addingTimeInterval(-1),
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/repo-a"}}
+            {"type":"event_msg","payload":{"type":"user_message","message":"First active Codex task"}}
+            {"type":"event_msg","payload":{"type":"agent_message","message":"Inspecting first task"}}
+            {"timestamp":"\(firstTimestamp)","type":"response_item","payload":{"type":"reasoning"}}
+            """,
+            fileName: "rollout-2026-05-19T10-00-00-first.jsonl")
+        try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now,
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-b","cwd":"/tmp/repo-b"}}
+            {"type":"event_msg","payload":{"type":"user_message","message":"Second active Codex task"}}
+            {"type":"event_msg","payload":{"type":"agent_message","message":"Inspecting second task"}}
+            {"timestamp":"\(secondTimestamp)","type":"response_item","payload":{"type":"function_call","name":"swift_test"}}
+            """,
+            fileName: "rollout-2026-05-19T10-00-00-second.jsonl")
+        let bridge = CodexSessionStatusBridge(statusDirectory: statusDirectory, sessionsRoot: sessionsRoot)
+
+        bridge.refresh(now: now)
+
+        let statuses = JsonFileCoderStatusSource(directory: statusDirectory).getStatuses(now: now)
+        XCTAssertEqual(statuses.count, 2)
+        XCTAssertEqual(statuses.map(\.sessionId), ["session-b", "session-a"])
+        XCTAssertEqual(statuses.map(\.taskSummary), ["Second active Codex task", "First active Codex task"])
+        XCTAssertEqual(statuses.map(\.taskDetail), ["Inspecting second task", "Inspecting first task"])
+    }
+
+    func testCodexSessionStatusBridgeIgnoresStaleEventsAndProcessFallbackSleeps() throws {
+        let statusDirectory = temporaryDirectory()
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let now = Date()
+        let timestamp = isoTimestamp(now.addingTimeInterval(-301))
+        try writeCodexSession(
+            sessionsRoot: sessionsRoot,
+            modifiedAt: now,
+            contents: """
+            {"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/repo"}}
+            {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"reasoning"}}
+            """)
+        let bridge = CodexSessionStatusBridge(statusDirectory: statusDirectory, sessionsRoot: sessionsRoot)
+        let source = CompositeCoderStatusSource([
+            JsonFileCoderStatusSource(directory: statusDirectory),
+            ProcessCoderStatusSource(
+                processInspector: FakeProcessInspector(tasks: [LongTaskProcess(processId: 123, name: "codex")]),
+                processNames: ["codex"])
+        ])
+
+        bridge.refresh(now: now)
+
+        let statuses = source.getStatuses(now: now)
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0].agent, "codex")
+        XCTAssertEqual(statuses[0].phase, .sleeping)
+        XCTAssertEqual(statuses[0].message, "No active Codex task is running.")
     }
 
     func testCompositeSourceUsesActiveCodexSessionBeforeSleepingProcessFallback() throws {
@@ -720,6 +905,96 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(paths.watcherExecutablePath, watcher.path)
     }
 
+    func testFirstLaunchInstallLocationDisablesMountedVolumeAndAllowsApplications() {
+        XCTAssertEqual(
+            AppInstallLocation(appPath: "/Volumes/Vibestick/Vibestick.app", homeDirectory: "/Users/test").kind,
+            .mountedVolume)
+        XCTAssertFalse(
+            AppInstallLocation(appPath: "/Volumes/Vibestick/Vibestick.app", homeDirectory: "/Users/test")
+                .canCompleteFirstLaunchInstall)
+
+        XCTAssertEqual(
+            AppInstallLocation(appPath: "/Applications/Vibestick.app", homeDirectory: "/Users/test").kind,
+            .systemApplications)
+        XCTAssertTrue(
+            AppInstallLocation(appPath: "/Applications/Vibestick.app", homeDirectory: "/Users/test")
+                .canCompleteFirstLaunchInstall)
+
+        XCTAssertEqual(
+            AppInstallLocation(appPath: "/Users/test/Applications/Vibestick.app", homeDirectory: "/Users/test").kind,
+            .userApplications)
+        XCTAssertTrue(
+            AppInstallLocation(appPath: "/Users/test/Applications/Vibestick.app", homeDirectory: "/Users/test")
+                .canCompleteFirstLaunchInstall)
+    }
+
+    func testFirstLaunchInstallerBlocksDmgRunBeforeInstallingAnything() {
+        let helper = FakeHelperInstaller(preflightResult: helperPreflightReady())
+        let watcher = FakeDeviceWatcherInstaller(statusResult: deviceWatcherStatusReady())
+        let installer = FirstLaunchInstaller(
+            appPath: "/Volumes/Vibestick/Vibestick.app",
+            homeDirectory: "/Users/test",
+            helperInstaller: helper,
+            deviceWatcherInstaller: watcher)
+
+        XCTAssertThrowsError(try installer.completeInstall()) { error in
+            XCTAssertEqual(
+                error as? FirstLaunchInstallError,
+                .appNotInApplications("/Volumes/Vibestick/Vibestick.app"))
+        }
+        XCTAssertEqual(helper.installCallCount, 0)
+        XCTAssertEqual(watcher.installCallCount, 0)
+    }
+
+    func testFirstLaunchInstallerInstallsHelperBeforeDeviceWatcher() throws {
+        let helper = FakeHelperInstaller(preflightResult: helperPreflightReady())
+        let watcher = FakeDeviceWatcherInstaller(statusResult: deviceWatcherStatusReady())
+        var calls: [String] = []
+        helper.onInstall = {
+            calls.append("helper")
+            return HelperInstallResult(
+                installedHelperPath: VibestickPaths.installedHelperPath,
+                installedPlistPath: VibestickPaths.launchDaemonPlistPath,
+                message: "Helper installed.",
+                detail: "")
+        }
+        watcher.onInstall = {
+            calls.append("watcher")
+            return DeviceWatcherInstallResult(
+                plistPath: VibestickPaths.deviceWatcherLaunchAgentPlistPath.path,
+                watcherExecutablePath: "/Applications/Vibestick.app/Contents/MacOS/VibestickDeviceWatcher",
+                appPath: "/Applications/Vibestick.app",
+                message: "Watcher installed.")
+        }
+        let installer = FirstLaunchInstaller(
+            appPath: "/Applications/Vibestick.app",
+            homeDirectory: "/Users/test",
+            helperInstaller: helper,
+            deviceWatcherInstaller: watcher)
+
+        let result = try installer.completeInstall()
+
+        XCTAssertTrue(result.helperInstalled)
+        XCTAssertTrue(result.deviceWatcherInstalled)
+        XCTAssertEqual(calls, ["helper", "watcher"])
+    }
+
+    func testFirstLaunchInstallerSkipsAlreadyInstalledComponents() throws {
+        let helper = FakeHelperInstaller(preflightResult: helperPreflightInstalled())
+        let watcher = FakeDeviceWatcherInstaller(statusResult: deviceWatcherStatusInstalled())
+        let installer = FirstLaunchInstaller(
+            appPath: "/Applications/Vibestick.app",
+            homeDirectory: "/Users/test",
+            helperInstaller: helper,
+            deviceWatcherInstaller: watcher)
+
+        let result = try installer.completeInstall()
+
+        XCTAssertFalse(result.didInstallAnything)
+        XCTAssertEqual(helper.installCallCount, 0)
+        XCTAssertEqual(watcher.installCallCount, 0)
+    }
+
     func testVibestickAppLauncherFocusesRunningAppAndOpensMissingProcess() throws {
         let directory = temporaryDirectory()
         let app = directory.appendingPathComponent("Vibestick.app", isDirectory: true)
@@ -804,6 +1079,20 @@ final class VibestickMacCoreTests: XCTestCase {
             taskDetail: nil)
     }
 
+    private func vibestickStatus(
+        activeMode: VibestickMode = .off,
+        battery: BatteryInfo = BatteryInfo(percentage: 80, isACConnected: true, isAvailable: true)
+    ) -> VibestickStatus {
+        VibestickStatus(
+            activeMode: activeMode,
+            restorePending: false,
+            pmset: nil,
+            battery: battery,
+            longTasks: [],
+            assertionActive: activeMode == .hyper,
+            warnings: [])
+    }
+
     private func createExecutable(named name: String, in directory: URL) throws -> URL {
         let url = directory.appendingPathComponent(name)
         FileManager.default.createFile(atPath: url.path, contents: Data("#!/bin/sh\n".utf8))
@@ -812,13 +1101,18 @@ final class VibestickMacCoreTests: XCTestCase {
     }
 
     @discardableResult
-    private func writeCodexSession(sessionsRoot: URL, modifiedAt: Date, contents: String) throws -> URL {
+    private func writeCodexSession(
+        sessionsRoot: URL,
+        modifiedAt: Date,
+        contents: String,
+        fileName: String = "rollout-2026-05-19T10-00-00-test.jsonl"
+    ) throws -> URL {
         let sessionDay = sessionsRoot
             .appendingPathComponent("2026", isDirectory: true)
             .appendingPathComponent("05", isDirectory: true)
             .appendingPathComponent("19", isDirectory: true)
         try FileManager.default.createDirectory(at: sessionDay, withIntermediateDirectories: true)
-        let path = sessionDay.appendingPathComponent("rollout-2026-05-19T10-00-00-test.jsonl")
+        let path = sessionDay.appendingPathComponent(fileName)
         try contents.appending("\n").write(to: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: path.path)
         return path
@@ -882,6 +1176,110 @@ private final class FakeApplicationController: MacApplicationControlling, @unche
         openedApps.append(appPath)
         openedArguments.append(arguments)
     }
+}
+
+private final class FakeHelperInstaller: HelperInstalling, @unchecked Sendable {
+    let paths = HelperInstallPaths(sourceHelperPath: "/tmp/helper", sourcePlistPath: "/tmp/helper.plist")
+    var preflightResult: HelperInstallPreflight
+    var installCallCount = 0
+    var onInstall: (() throws -> HelperInstallResult)?
+
+    init(preflightResult: HelperInstallPreflight) {
+        self.preflightResult = preflightResult
+    }
+
+    func preflight() -> HelperInstallPreflight {
+        preflightResult
+    }
+
+    func install() throws -> HelperInstallResult {
+        installCallCount += 1
+        if let onInstall {
+            return try onInstall()
+        }
+        return HelperInstallResult(
+            installedHelperPath: VibestickPaths.installedHelperPath,
+            installedPlistPath: VibestickPaths.launchDaemonPlistPath,
+            message: "Helper installed.",
+            detail: "")
+    }
+}
+
+private final class FakeDeviceWatcherInstaller: DeviceWatcherInstalling, @unchecked Sendable {
+    let paths = DeviceWatcherInstallPaths(
+        watcherExecutablePath: "/Applications/Vibestick.app/Contents/MacOS/VibestickDeviceWatcher",
+        appPath: "/Applications/Vibestick.app")
+    var statusResult: DeviceWatcherInstallStatus
+    var installCallCount = 0
+    var uninstallCallCount = 0
+    var onInstall: (() throws -> DeviceWatcherInstallResult)?
+
+    init(statusResult: DeviceWatcherInstallStatus) {
+        self.statusResult = statusResult
+    }
+
+    func status() -> DeviceWatcherInstallStatus {
+        statusResult
+    }
+
+    func install() throws -> DeviceWatcherInstallResult {
+        installCallCount += 1
+        if let onInstall {
+            return try onInstall()
+        }
+        return DeviceWatcherInstallResult(
+            plistPath: VibestickPaths.deviceWatcherLaunchAgentPlistPath.path,
+            watcherExecutablePath: paths.watcherExecutablePath,
+            appPath: paths.appPath,
+            message: "Watcher installed.")
+    }
+
+    func uninstall() throws -> DeviceWatcherInstallResult {
+        uninstallCallCount += 1
+        return DeviceWatcherInstallResult(
+            plistPath: VibestickPaths.deviceWatcherLaunchAgentPlistPath.path,
+            watcherExecutablePath: paths.watcherExecutablePath,
+            appPath: paths.appPath,
+            message: "Watcher uninstalled.")
+    }
+}
+
+private func helperPreflightReady() -> HelperInstallPreflight {
+    HelperInstallPreflight(
+        sourceHelperExists: true,
+        sourcePlistExists: true,
+        helperInstalled: false,
+        plistInstalled: false)
+}
+
+private func helperPreflightInstalled() -> HelperInstallPreflight {
+    HelperInstallPreflight(
+        sourceHelperExists: false,
+        sourcePlistExists: false,
+        helperInstalled: true,
+        plistInstalled: true)
+}
+
+private func deviceWatcherStatusReady() -> DeviceWatcherInstallStatus {
+    DeviceWatcherInstallStatus(
+        watcherExecutablePath: "/Applications/Vibestick.app/Contents/MacOS/VibestickDeviceWatcher",
+        appPath: "/Applications/Vibestick.app",
+        plistPath: VibestickPaths.deviceWatcherLaunchAgentPlistPath.path,
+        watcherExecutableExists: true,
+        appExists: true,
+        plistInstalled: false,
+        launchAgentLoaded: false)
+}
+
+private func deviceWatcherStatusInstalled() -> DeviceWatcherInstallStatus {
+    DeviceWatcherInstallStatus(
+        watcherExecutablePath: "/Applications/Vibestick.app/Contents/MacOS/VibestickDeviceWatcher",
+        appPath: "/Applications/Vibestick.app",
+        plistPath: VibestickPaths.deviceWatcherLaunchAgentPlistPath.path,
+        watcherExecutableExists: false,
+        appExists: false,
+        plistInstalled: true,
+        launchAgentLoaded: true)
 }
 
 private func extractStagedDirectory(from value: String) -> String? {

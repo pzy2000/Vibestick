@@ -1,6 +1,8 @@
 import Foundation
 
 public final class PetStateResolver: Sendable {
+    private static let lowBatteryThreshold = 20
+
     public init() {}
 
     public func resolve(status: VibestickStatus, coders: [CoderAgentStatus]) -> PetState {
@@ -10,6 +12,8 @@ public final class PetStateResolver: Sendable {
             mood = "power"
         } else if let primary {
             mood = Self.mood(for: primary.phase)
+        } else if Self.isLowBattery(status.battery) {
+            mood = "low_battery"
         } else {
             mood = "idle"
         }
@@ -29,7 +33,8 @@ public final class PetStateResolver: Sendable {
 
     private static func mood(for phase: CoderAgentPhase) -> String {
         switch phase {
-        case .running, .toolCalling: "running"
+        case .running: "running"
+        case .toolCalling: "tool_calling"
         case .reasoning: "reasoning"
         case .waitingAuthorization: "waiting"
         case .error: "error"
@@ -38,5 +43,15 @@ public final class PetStateResolver: Sendable {
         case .sleeping: "sleeping"
         case .idle, .unknown: "idle"
         }
+    }
+
+    private static func isLowBattery(_ battery: BatteryInfo) -> Bool {
+        guard battery.isAvailable,
+              !battery.isACConnected,
+              let percentage = battery.percentage
+        else {
+            return false
+        }
+        return percentage <= lowBatteryThreshold
     }
 }

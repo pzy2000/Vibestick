@@ -65,7 +65,8 @@ public final class CoderStatusWriter: @unchecked Sendable {
         sessionId: String?,
         taskSummary: String?,
         sourcePath: String?,
-        taskDetail: String?
+        taskDetail: String?,
+        updatedAtUtc: Date = Date()
     ) throws -> CoderAgentStatus {
         let status = CoderAgentStatus(
             agent: agent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "coder" : agent,
@@ -73,7 +74,7 @@ public final class CoderStatusWriter: @unchecked Sendable {
             message: clean(message),
             workspace: clean(workspace),
             processId: processId,
-            updatedAtUtc: Date(),
+            updatedAtUtc: updatedAtUtc,
             ttlSeconds: ttlSeconds,
             sessionId: clean(sessionId),
             taskSummary: clean(taskSummary),

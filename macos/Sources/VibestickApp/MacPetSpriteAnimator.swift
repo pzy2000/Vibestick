@@ -134,16 +134,16 @@ final class MacPetSpriteAnimator {
     }
 
     private func resolveClip() -> PetAnimationClip {
-        if isHovering || ["error", "waiting", "power"].contains(mood) {
+        if isHovering {
             randomActionClip = nil
             return Self.clips["attention_paw"]!
         }
+        if let fixedClip = fixedStateClip(for: mood) {
+            randomActionClip = nil
+            return fixedClip
+        }
         if crawlDirection != nil {
             return Self.clips["patrol_crawl"]!
-        }
-        if mood == "sleeping" {
-            randomActionClip = nil
-            return Self.clips["sleepy_nap"]!
         }
         if let randomActionClip {
             return randomActionClip
@@ -192,7 +192,28 @@ final class MacPetSpriteAnimator {
     }
 
     private func canUseRandomActions(_ mood: String) -> Bool {
-        ["idle", "success", "offline", "running", "reasoning"].contains(mood)
+        ["idle", "offline", "running", "reasoning"].contains(mood)
+    }
+
+    private func fixedStateClip(for mood: String) -> PetAnimationClip? {
+        switch mood {
+        case "waiting":
+            Self.clips["waiting_peek"]!
+        case "tool_calling":
+            Self.clips["tool_typing"]!
+        case "success":
+            Self.clips["success_jump"]!
+        case "error":
+            Self.clips["error_shake"]!
+        case "low_battery":
+            Self.clips["low_battery_curl"]!
+        case "power":
+            Self.clips["power_guard"]!
+        case "sleeping":
+            Self.clips["sleepy_nap"]!
+        default:
+            nil
+        }
     }
 
     private func baseClip(for mood: String) -> PetAnimationClip {
@@ -201,8 +222,6 @@ final class MacPetSpriteAnimator {
             Self.clips["curious_look"]!
         case "sleeping":
             Self.clips["sleepy_nap"]!
-        case "error", "waiting", "power":
-            Self.clips["attention_paw"]!
         default:
             Self.clips["seated_blink"]!
         }
@@ -217,7 +236,13 @@ final class MacPetSpriteAnimator {
             PetAnimationClip("sleepy_nap", "sleepy", row(5, 0, 7), 0.300, false, false),
             PetAnimationClip("curious_look", "curious", row(6, 0, 5), 0.260, true, false),
             PetAnimationClip("happy_beg", "happy", row(7, 0, 5), 0.250, false, false),
-            PetAnimationClip("groom_think", "grooming", row(8, 0, 5), 0.260, false, false)
+            PetAnimationClip("groom_think", "grooming", row(8, 0, 5), 0.260, false, false),
+            PetAnimationClip("waiting_peek", "peek", peekFrames(), 0.180, true, false),
+            PetAnimationClip("tool_typing", "typing", typingFrames(), 0.120, true, false),
+            PetAnimationClip("success_jump", "jump", successJumpFrames(), 0.115, false, false),
+            PetAnimationClip("error_shake", "shake", errorShakeFrames(), 0.085, true, false),
+            PetAnimationClip("low_battery_curl", "curled", row(5, 2, 7), 0.420, true, false),
+            PetAnimationClip("power_guard", "guard", row(3, 0, 3), 0.160, true, false)
         ]
         return Dictionary(uniqueKeysWithValues: clips.map { ($0.name, $0) })
     }
@@ -234,6 +259,42 @@ final class MacPetSpriteAnimator {
                 row: frame.row,
                 motionOffsetX: offset.x,
                 motionOffsetY: offset.y)
+        }
+    }
+
+    private static func peekFrames() -> [PetSpriteFrameRef] {
+        [0, 1, 2, 3, 4, 3, 2, 1].map { column in
+            PetSpriteFrameRef(column: column, row: 6)
+        }
+    }
+
+    private static func typingFrames() -> [PetSpriteFrameRef] {
+        [0, 1, 2, 3, 4, 5, 4, 3, 2, 1].enumerated().map { index, column in
+            PetSpriteFrameRef(
+                column: column,
+                row: 8,
+                motionOffsetX: index.isMultiple(of: 2) ? -1 : 1,
+                motionOffsetY: 0)
+        }
+    }
+
+    private static func successJumpFrames() -> [PetSpriteFrameRef] {
+        zip(row(7, 0, 5), [0, -10, -22, -14, -6, 0]).map { frame, offsetY in
+            PetSpriteFrameRef(
+                column: frame.column,
+                row: frame.row,
+                motionOffsetX: 0,
+                motionOffsetY: Double(offsetY))
+        }
+    }
+
+    private static func errorShakeFrames() -> [PetSpriteFrameRef] {
+        zip([0, 1, 2, 3, 2, 1], [-5, 5, -4, 4, -2, 2]).map { column, offsetX in
+            PetSpriteFrameRef(
+                column: column,
+                row: 3,
+                motionOffsetX: Double(offsetX),
+                motionOffsetY: 0)
         }
     }
 
