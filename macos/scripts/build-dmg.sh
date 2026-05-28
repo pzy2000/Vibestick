@@ -59,10 +59,10 @@ sign_bundle() {
 }
 
 rm -rf "$rw_dmg" "$final_dmg"
-mkdir -p "$dmg_root/.background"
+mkdir -p "$dmg_root"
 ditto --norsrc --noextattr "$app" "$dmg_root/Vibestick.app"
 ln -s /Applications "$dmg_root/Applications"
-cp "$background" "$dmg_root/.background/Vibestick-dmg-background.png"
+cp "$background" "$dmg_root/Vibestick.app/Contents/Resources/Vibestick-dmg-background.png"
 
 hdiutil create \
   -srcfolder "$dmg_root" \
@@ -91,7 +91,7 @@ tell application "Finder"
   set viewOptions to the icon view options of container window of dmgFolder
   set arrangement of viewOptions to not arranged
   set icon size of viewOptions to 96
-  set background picture of viewOptions to POSIX file "$mount_dir/.background/Vibestick-dmg-background.png"
+  set background picture of viewOptions to POSIX file "$mount_dir/Vibestick.app/Contents/Resources/Vibestick-dmg-background.png"
   set position of item "Vibestick.app" of dmgFolder to {160, 210}
   set position of item "Applications" of dmgFolder to {480, 210}
   update dmgFolder without registering applications
@@ -100,7 +100,7 @@ tell application "Finder"
 end tell
 APPLESCRIPT
 
-SetFile -a V "$mount_dir/.background"
+rm -rf "$mount_dir/.fseventsd"
 sign_bundle "$mount_dir/Vibestick.app"
 sync
 hdiutil detach "$device" -quiet
