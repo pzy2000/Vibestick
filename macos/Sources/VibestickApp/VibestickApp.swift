@@ -977,7 +977,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     func startWalking() {
         if walkingEnabled {
-            alignToWalkLane()
+            resumeWalkingFromCurrentPosition()
         } else {
             clampCurrentPosition()
         }
@@ -994,7 +994,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         pauseUntil = nil
         lastTick = nil
         if walkingEnabled {
-            alignToWalkLane()
+            resumeWalkingFromCurrentPosition()
         } else {
             clampCurrentPosition()
             saveCurrentPosition()
@@ -1009,7 +1009,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         lastTick = nil
 
         if walkingEnabled {
-            alignToWalkLane()
+            resumeWalkingFromCurrentPosition()
         }
 
         updateWalkingMenuText()
@@ -1028,7 +1028,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         setFrameOrigin(Self.clampedFrame(Self.defaultFrame, preferredScreenIdentifier: nil).origin)
 
         if walkingEnabled {
-            alignToWalkLane()
+            resumeWalkingFromCurrentPosition()
         } else {
             saveCurrentPosition()
         }
@@ -1095,6 +1095,12 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         setFrameOrigin(next.origin)
     }
 
+    private func resumeWalkingFromCurrentPosition() {
+        pauseUntil = nil
+        lastTick = nil
+        alignToWalkLane(resetDirection: true)
+    }
+
     private func beginManualDrag() {
         if walkingEnabled {
             walkingEnabled = false
@@ -1115,14 +1121,34 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         saveCurrentPosition()
     }
 
-    private func alignToWalkLane() {
+    private func alignToWalkLane(resetDirection: Bool = false) {
         guard let screen = targetScreen(for: frame, preferRetainedScreen: true) else {
             return
         }
         var next = frame
         next.origin.y = screen.visibleFrame.minY + bottomMargin
-        next.origin.x = min(max(next.origin.x, screen.visibleFrame.minX), screen.visibleFrame.maxX - next.width)
+        let minX = screen.visibleFrame.minX
+        let maxX = max(minX, screen.visibleFrame.maxX - next.width)
+        next.origin.x = min(max(next.origin.x, minX), maxX)
         setFrameOrigin(next.origin)
+        retainedScreenIdentifier = Self.screenIdentifier(for: screen)
+        if resetDirection {
+            direction = crawlDirection(for: next.origin.x, on: screen)
+        }
+    }
+
+    private func crawlDirection(for originX: CGFloat, on screen: NSScreen) -> MacPetCrawlDirection {
+        let minX = screen.visibleFrame.minX
+        let maxX = max(minX, screen.visibleFrame.maxX - frame.width)
+        let tolerance: CGFloat = 2
+        if originX <= minX + tolerance {
+            return .right
+        }
+        if originX >= maxX - tolerance {
+            return .left
+        }
+        let midpoint = minX + ((maxX - minX) / 2)
+        return originX < midpoint ? .right : .left
     }
 
     private func clampCurrentPosition() {
