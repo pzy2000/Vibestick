@@ -1264,24 +1264,18 @@ internal static class Program
             var firstLeft = first["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
             AssertWithinBottomWalkLane(first);
             AssertSpriteClip(first, "patrol_crawl");
-            AssertSpritePoseInRows(first, "crawling", new[] { 1, 2 });
+            AssertCrawlDirectionMatchesSpriteRow(first);
             AssertEqual(57, first["sprite"]?["catalogFrameCount"]?.GetValue<int>());
 
             var animated = await WaitForWalkingMotionSnapshotAsync(directory, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             AssertSpriteClip(animated, "patrol_crawl");
-            AssertSpritePoseInRows(animated, "crawling", new[] { 1, 2 });
+            AssertCrawlDirectionMatchesSpriteRow(animated);
             AssertCrawlVisualMotion(animated);
 
             var second = await WaitForPetLeftChangeAsync(directory, firstLeft, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             AssertWithinBottomWalkLane(second);
             AssertSpriteClip(second, "patrol_crawl");
-            AssertSpritePoseInRows(second, "crawling", new[] { 1, 2 });
-            var direction = second["walking"]?["direction"]?.GetValue<string>() ??
-                throw new InvalidOperationException("Snapshot missing walking direction.");
-            AssertTrue(direction is "Left" or "Right");
-
-            var rowTwo = await WaitForSpriteRowAsync(directory, "patrol_crawl", 2, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-            AssertSpritePoseInRows(rowTwo, "crawling", new[] { 2 });
+            AssertCrawlDirectionMatchesSpriteRow(second);
         }
         finally
         {
@@ -2120,6 +2114,19 @@ internal static class Program
         {
             throw new InvalidOperationException($"Expected sprite row in [{string.Join(", ", expectedRows)}], got {row}.");
         }
+    }
+
+    private static void AssertCrawlDirectionMatchesSpriteRow(JsonNode snapshot)
+    {
+        var direction = snapshot["walking"]?["direction"]?.GetValue<string>() ??
+            throw new InvalidOperationException("Snapshot missing walking direction.");
+        var expectedRow = direction switch
+        {
+            "Right" => 1,
+            "Left" => 2,
+            _ => throw new InvalidOperationException($"Unexpected walking direction '{direction}'.")
+        };
+        AssertSpritePose(snapshot, "crawling", expectedRow);
     }
 
     private static void AssertSpriteClip(JsonNode snapshot, string expectedClipName)

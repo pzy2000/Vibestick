@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import VibestickApp
 
@@ -41,31 +42,33 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         let frame = animator.frame
         XCTAssertEqual(frame.clipName, "patrol_crawl")
         XCTAssertEqual(frame.pose, "crawling")
-        XCTAssertTrue([1, 2].contains(frame.row))
-        XCTAssertTrue(frame.flipsWithDirection)
+        XCTAssertEqual(frame.row, 1)
+        XCTAssertFalse(frame.flipsWithDirection)
     }
 
-    func testRightCrawlUsesUnmirroredPresentationOffset() {
+    func testRightCrawlUsesRunningRightRowWithoutMirroring() {
         let animator = MacPetSpriteAnimator()
 
         animator.setCrawlDirection(.right)
 
         let presentation = animator.presentation
+        XCTAssertEqual(presentation.frame.row, 1)
         XCTAssertEqual(presentation.horizontalScale, 1)
         XCTAssertEqual(presentation.renderedMotionOffsetX, CGFloat(presentation.frame.motionOffsetX))
     }
 
-    func testLeftCrawlMirrorsPresentationOffset() {
+    func testLeftCrawlUsesRunningLeftRowWithoutMirroring() {
         let animator = MacPetSpriteAnimator()
 
         animator.setCrawlDirection(.left)
 
         let presentation = animator.presentation
-        XCTAssertEqual(presentation.horizontalScale, -1)
-        XCTAssertEqual(presentation.renderedMotionOffsetX, -CGFloat(presentation.frame.motionOffsetX))
+        XCTAssertEqual(presentation.frame.row, 2)
+        XCTAssertEqual(presentation.horizontalScale, 1)
+        XCTAssertEqual(presentation.renderedMotionOffsetX, CGFloat(presentation.frame.motionOffsetX))
     }
 
-    func testLeftAndRightCrawlRenderedOffsetsAreOppositeForSameFrame() {
+    func testLeftAndRightCrawlUseMatchingRowsForSameFrame() {
         let rightAnimator = MacPetSpriteAnimator()
         let leftAnimator = MacPetSpriteAnimator()
 
@@ -73,9 +76,21 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         leftAnimator.setCrawlDirection(.left)
 
         XCTAssertEqual(rightAnimator.frame.frameIndex, leftAnimator.frame.frameIndex)
-        XCTAssertEqual(
-            leftAnimator.presentation.renderedMotionOffsetX,
-            -rightAnimator.presentation.renderedMotionOffsetX)
+        XCTAssertEqual(rightAnimator.frame.row, 1)
+        XCTAssertEqual(leftAnimator.frame.row, 2)
+        XCTAssertEqual(leftAnimator.presentation.renderedMotionOffsetX, rightAnimator.presentation.renderedMotionOffsetX)
+    }
+
+    func testRightCrawlFramesStayOnRunningRightRow() {
+        let rows = crawlRows(for: .right)
+
+        XCTAssertEqual(rows, Array(repeating: 1, count: 8))
+    }
+
+    func testLeftCrawlFramesStayOnRunningLeftRow() {
+        let rows = crawlRows(for: .left)
+
+        XCTAssertEqual(rows, Array(repeating: 2, count: 8))
     }
 
     func testCrawlDirectionStartsCrawlingWhenAlreadyHovering() {
@@ -87,7 +102,7 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         let frame = animator.frame
         XCTAssertEqual(frame.clipName, "patrol_crawl")
         XCTAssertEqual(frame.pose, "crawling")
-        XCTAssertTrue([1, 2].contains(frame.row))
+        XCTAssertEqual(frame.row, 1)
     }
 
     func testCrawlDirectionOverridesFixedMoodClip() {
@@ -99,8 +114,8 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         let frame = animator.frame
         XCTAssertEqual(frame.clipName, "patrol_crawl")
         XCTAssertEqual(frame.pose, "crawling")
-        XCTAssertTrue([1, 2].contains(frame.row))
-        XCTAssertTrue(frame.flipsWithDirection)
+        XCTAssertEqual(frame.row, 2)
+        XCTAssertFalse(frame.flipsWithDirection)
     }
 
     func testHoveringOverridesFixedMoodAndClearingHoverRestoresMoodClip() {
@@ -126,5 +141,95 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
     func testDragDirectionHelperKeepsCurrentDirectionForSmallJitter() {
         XCTAssertEqual(MacPetCrawlDirection.direction(forDragDeltaX: 0.5, current: .left), .left)
         XCTAssertEqual(MacPetCrawlDirection.direction(forDragDeltaX: -0.5, current: .right), .right)
+    }
+
+    func testAppliedDeltaDirectionKeepsCurrentFrameLeftWhenNextDirectionTurnsRight() {
+        let animationDirection = MacPetCrawlDirection.direction(
+            forAppliedDeltaX: -8,
+            fallback: .right)
+
+        XCTAssertEqual(animationDirection, .left)
+    }
+
+    func testAppliedDeltaDirectionKeepsCurrentFrameRightWhenNextDirectionTurnsLeft() {
+        let animationDirection = MacPetCrawlDirection.direction(
+            forAppliedDeltaX: 8,
+            fallback: .left)
+
+        XCTAssertEqual(animationDirection, .right)
+    }
+
+    func testAppliedDeltaDirectionKeepsFallbackForTinyMovement() {
+        XCTAssertEqual(
+            MacPetCrawlDirection.direction(forAppliedDeltaX: 0.5, fallback: .left),
+            .left)
+        XCTAssertEqual(
+            MacPetCrawlDirection.direction(forAppliedDeltaX: -0.5, fallback: .right),
+            .right)
+    }
+
+    func testAppliedDeltaDirectionClearsWhenWindowDidNotMove() {
+        XCTAssertNil(MacPetCrawlDirection.direction(forAppliedDeltaX: 0, fallback: .right))
+        XCTAssertNil(MacPetCrawlDirection.direction(forAppliedDeltaX: 0, fallback: .left))
+    }
+
+    func testManualDragDirectionOverridesWalkingAnimationDirection() {
+        let direction = MacPetCrawlDirection.activeAnimationDirection(
+            manualDragDirection: .left,
+            walkingAnimationDirection: .right,
+            walkingCanAnimate: true)
+
+        XCTAssertEqual(direction, .left)
+    }
+
+    func testWalkingAnimationDirectionRequiresWalkingAnimationAllowed() {
+        XCTAssertEqual(
+            MacPetCrawlDirection.activeAnimationDirection(
+                manualDragDirection: nil,
+                walkingAnimationDirection: .right,
+                walkingCanAnimate: true),
+            .right)
+        XCTAssertNil(
+            MacPetCrawlDirection.activeAnimationDirection(
+                manualDragDirection: nil,
+                walkingAnimationDirection: .right,
+                walkingCanAnimate: false))
+    }
+
+    private func crawlRows(for direction: MacPetCrawlDirection) -> [Int] {
+        let animator = MacPetSpriteAnimator()
+        let start = Date()
+        animator.setCrawlDirection(direction)
+
+        var rows = [animator.frame.row]
+        for step in 1..<8 {
+            _ = animator.advanceFrameIfDue(at: start.addingTimeInterval(Double(step)))
+            rows.append(animator.frame.row)
+        }
+        return rows
+    }
+}
+
+final class MacPetWalkGeometryTests: XCTestCase {
+    func testWalkBoundsUseSpriteLaneWhenStatusCardIsWiderThanPet() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let bounds = MacPetWalkGeometry.walkBounds(
+            visibleFrame: visibleFrame,
+            panelWidth: 352,
+            spriteLaneWidth: 220)
+
+        XCTAssertEqual(bounds.minX, -66)
+        XCTAssertEqual(bounds.maxX, 714)
+    }
+
+    func testWalkBoundsKeepPanelInsideScreenWhenPanelIsNotWiderThanPet() {
+        let visibleFrame = NSRect(x: 100, y: 0, width: 900, height: 700)
+        let bounds = MacPetWalkGeometry.walkBounds(
+            visibleFrame: visibleFrame,
+            panelWidth: 200,
+            spriteLaneWidth: 220)
+
+        XCTAssertEqual(bounds.minX, 100)
+        XCTAssertEqual(bounds.maxX, 800)
     }
 }

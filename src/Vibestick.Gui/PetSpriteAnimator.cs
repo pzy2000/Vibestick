@@ -178,7 +178,9 @@ public sealed class PetSpriteAnimator
     {
         if (_crawlDirection is not null)
         {
-            return Clip("patrol_crawl");
+            return _crawlDirection == PetSpriteCrawlDirection.Left
+                ? Clip("patrol_crawl_left")
+                : Clip("patrol_crawl_right");
         }
 
         if (_isHovering)
@@ -323,19 +325,20 @@ public sealed class PetSpriteAnimator
 
     private static IReadOnlyDictionary<string, PetAnimationClip> BuildClips()
     {
-        var clips = new[]
+        var clips = new Dictionary<string, PetAnimationClip>(StringComparer.OrdinalIgnoreCase)
         {
-            new PetAnimationClip("seated_blink", "seated", Row(0, 0, 5), TimeSpan.FromMilliseconds(360), Loops: true, FlipsWithDirection: false),
-            new PetAnimationClip("patrol_crawl", "crawling", PatrolFrames(), TimeSpan.FromMilliseconds(115), Loops: true, FlipsWithDirection: true),
-            new PetAnimationClip("attention_paw", "attention", Row(3, 0, 3), TimeSpan.FromMilliseconds(210), Loops: false, FlipsWithDirection: false),
-            new PetAnimationClip("playful_stretch", "stretch", Row(4, 0, 4), TimeSpan.FromMilliseconds(240), Loops: false, FlipsWithDirection: false),
-            new PetAnimationClip("sleepy_nap", "sleepy", Row(5, 0, 7), TimeSpan.FromMilliseconds(300), Loops: false, FlipsWithDirection: false),
-            new PetAnimationClip("curious_look", "curious", Row(6, 0, 5), TimeSpan.FromMilliseconds(260), Loops: true, FlipsWithDirection: false),
-            new PetAnimationClip("happy_beg", "happy", Row(7, 0, 5), TimeSpan.FromMilliseconds(250), Loops: false, FlipsWithDirection: false),
-            new PetAnimationClip("groom_think", "grooming", Row(8, 0, 5), TimeSpan.FromMilliseconds(260), Loops: false, FlipsWithDirection: false)
+            ["seated_blink"] = new PetAnimationClip("seated_blink", "seated", Row(0, 0, 5), TimeSpan.FromMilliseconds(360), Loops: true, FlipsWithDirection: false),
+            ["patrol_crawl_right"] = new PetAnimationClip("patrol_crawl", "crawling", PatrolFrames(1), TimeSpan.FromMilliseconds(115), Loops: true, FlipsWithDirection: false),
+            ["patrol_crawl_left"] = new PetAnimationClip("patrol_crawl", "crawling", PatrolFrames(2), TimeSpan.FromMilliseconds(115), Loops: true, FlipsWithDirection: false),
+            ["attention_paw"] = new PetAnimationClip("attention_paw", "attention", Row(3, 0, 3), TimeSpan.FromMilliseconds(210), Loops: false, FlipsWithDirection: false),
+            ["playful_stretch"] = new PetAnimationClip("playful_stretch", "stretch", Row(4, 0, 4), TimeSpan.FromMilliseconds(240), Loops: false, FlipsWithDirection: false),
+            ["sleepy_nap"] = new PetAnimationClip("sleepy_nap", "sleepy", Row(5, 0, 7), TimeSpan.FromMilliseconds(300), Loops: false, FlipsWithDirection: false),
+            ["curious_look"] = new PetAnimationClip("curious_look", "curious", Row(6, 0, 5), TimeSpan.FromMilliseconds(260), Loops: true, FlipsWithDirection: false),
+            ["happy_beg"] = new PetAnimationClip("happy_beg", "happy", Row(7, 0, 5), TimeSpan.FromMilliseconds(250), Loops: false, FlipsWithDirection: false),
+            ["groom_think"] = new PetAnimationClip("groom_think", "grooming", Row(8, 0, 5), TimeSpan.FromMilliseconds(260), Loops: false, FlipsWithDirection: false)
         };
 
-        return clips.ToDictionary(static clip => clip.Name, StringComparer.OrdinalIgnoreCase);
+        return clips;
     }
 
     private static PetAnimationClip Clip(string name)
@@ -350,10 +353,9 @@ public sealed class PetSpriteAnimator
             .ToArray();
     }
 
-    private static IReadOnlyList<PetSpriteFrameRef> PatrolFrames()
+    private static IReadOnlyList<PetSpriteFrameRef> PatrolFrames(int row)
     {
-        return Row(1, 0, 7)
-            .Concat(Row(2, 0, 7))
+        return Row(row, 0, 7)
             .Select((frame, index) =>
             {
                 var (offsetX, offsetY) = GetPatrolMotion(index);

@@ -16,6 +16,33 @@ enum MacPetCrawlDirection: Equatable {
         }
         return current
     }
+
+    static func direction(
+        forAppliedDeltaX deltaX: CGFloat,
+        fallback: MacPetCrawlDirection?
+    ) -> MacPetCrawlDirection? {
+        guard deltaX != 0 else {
+            return nil
+        }
+        if deltaX > dragDirectionThreshold {
+            return .right
+        }
+        if deltaX < -dragDirectionThreshold {
+            return .left
+        }
+        return fallback
+    }
+
+    static func activeAnimationDirection(
+        manualDragDirection: MacPetCrawlDirection?,
+        walkingAnimationDirection: MacPetCrawlDirection?,
+        walkingCanAnimate: Bool
+    ) -> MacPetCrawlDirection? {
+        if let manualDragDirection {
+            return manualDragDirection
+        }
+        return walkingCanAnimate ? walkingAnimationDirection : nil
+    }
 }
 
 struct MacPetSpriteFrameSnapshot: Equatable {
@@ -140,7 +167,7 @@ final class MacPetSpriteAnimator {
 
     private func selectClip(forceReset: Bool) -> Bool {
         let selected = resolveClip()
-        if forceReset || selected.name != activeClip.name {
+        if forceReset || selected.id != activeClip.id {
             activeClip = selected
             frameIndex = 0
             lastFrameAdvanceAt = Date()
@@ -150,8 +177,8 @@ final class MacPetSpriteAnimator {
     }
 
     private func resolveClip() -> PetAnimationClip {
-        if crawlDirection != nil {
-            return Self.clips["patrol_crawl"]!
+        if let crawlDirection {
+            return Self.clips[crawlDirection == .left ? "patrol_crawl_left" : "patrol_crawl_right"]!
         }
         if isHovering {
             randomActionClip = nil
@@ -244,7 +271,8 @@ final class MacPetSpriteAnimator {
     private static func buildClips() -> [String: PetAnimationClip] {
         let clips = [
             PetAnimationClip("seated_blink", "seated", row(0, 0, 5), 0.360, true, false),
-            PetAnimationClip("patrol_crawl", "crawling", patrolFrames(), 0.115, true, true),
+            PetAnimationClip("patrol_crawl_right", "crawling", patrolFrames(row: 1), 0.115, true, false, clipName: "patrol_crawl"),
+            PetAnimationClip("patrol_crawl_left", "crawling", patrolFrames(row: 2), 0.115, true, false, clipName: "patrol_crawl"),
             PetAnimationClip("attention_paw", "attention", row(3, 0, 3), 0.210, false, false),
             PetAnimationClip("playful_stretch", "stretch", row(4, 0, 4), 0.240, false, false),
             PetAnimationClip("sleepy_nap", "sleepy", row(5, 0, 7), 0.300, false, false),
@@ -258,15 +286,15 @@ final class MacPetSpriteAnimator {
             PetAnimationClip("low_battery_curl", "curled", row(5, 2, 7), 0.420, true, false),
             PetAnimationClip("power_guard", "guard", row(3, 0, 3), 0.160, true, false)
         ]
-        return Dictionary(uniqueKeysWithValues: clips.map { ($0.name, $0) })
+        return Dictionary(uniqueKeysWithValues: clips.map { ($0.id, $0) })
     }
 
     private static func row(_ row: Int, _ firstColumn: Int, _ lastColumn: Int) -> [PetSpriteFrameRef] {
         (firstColumn...lastColumn).map { PetSpriteFrameRef(column: $0, row: row) }
     }
 
-    private static func patrolFrames() -> [PetSpriteFrameRef] {
-        (row(1, 0, 7) + row(2, 0, 7)).enumerated().map { index, frame in
+    private static func patrolFrames(row: Int) -> [PetSpriteFrameRef] {
+        Self.row(row, 0, 7).enumerated().map { index, frame in
             let offset = patrolMotion(index)
             return PetSpriteFrameRef(
                 column: frame.column,
@@ -425,6 +453,7 @@ private struct PetSpriteFrameRef {
 }
 
 private struct PetAnimationClip {
+    let id: String
     let name: String
     let pose: String
     let frames: [PetSpriteFrameRef]
@@ -433,14 +462,16 @@ private struct PetAnimationClip {
     let flipsWithDirection: Bool
 
     init(
-        _ name: String,
+        _ id: String,
         _ pose: String,
         _ frames: [PetSpriteFrameRef],
         _ frameInterval: TimeInterval,
         _ loops: Bool,
-        _ flipsWithDirection: Bool
+        _ flipsWithDirection: Bool,
+        clipName: String? = nil
     ) {
-        self.name = name
+        self.id = id
+        self.name = clipName ?? id
         self.pose = pose
         self.frames = frames
         self.frameInterval = frameInterval

@@ -1404,6 +1404,21 @@ private struct PetPresenceSnapshot {
     let retainedScreenIdentifier: String?
 }
 
+enum MacPetWalkGeometry {
+    static let spriteLaneWidth: CGFloat = 220
+
+    static func walkBounds(
+        visibleFrame: NSRect,
+        panelWidth: CGFloat,
+        spriteLaneWidth: CGFloat = spriteLaneWidth
+    ) -> (minX: CGFloat, maxX: CGFloat) {
+        let sideOverhang = max((panelWidth - spriteLaneWidth) / 2, 0)
+        let minX = visibleFrame.minX - sideOverhang
+        let maxX = max(minX, visibleFrame.maxX - panelWidth + sideOverhang)
+        return (minX, maxX)
+    }
+}
+
 @MainActor
 final class PetPanel: NSPanel, NSMenuDelegate {
     private static let walkingEnabledDefaultsKey = "VibestickPetWalkingEnabled"
@@ -1434,6 +1449,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var nextWanderAt: Date?
     private var direction: MacPetCrawlDirection = .left
     private var manualDragDirection: MacPetCrawlDirection?
+    private var walkingAnimationDirection: MacPetCrawlDirection?
     private var currentWalkSpeed = PetPanel.randomWalkSpeed()
     private var crawlAnimationSuppressed = false
     private var walkingEnabled = PetPanel.loadWalkingEnabled()
@@ -1446,6 +1462,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private static let edgeTolerance: CGFloat = 2
     private static let reducedAlpha: CGFloat = 0.42
     private static let reducedCornerMargin: CGFloat = 12
+    private static let spriteWalkLaneWidth = MacPetWalkGeometry.spriteLaneWidth
     private let bottomMargin: CGFloat = 16
 
     init(
@@ -1651,12 +1668,14 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         guard walkingEnabled, presenceMode == .normal else {
             pauseUntil = nil
             nextWanderAt = nil
+            walkingAnimationDirection = nil
             crawlAnimationSuppressed = presenceMode == .reduced
             lastTick = now
             return
         }
 
         if let pauseUntil, now < pauseUntil {
+            walkingAnimationDirection = nil
             lastTick = now
             return
         }
@@ -1677,12 +1696,15 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             next.origin.x = min(max(next.origin.x, bounds.minX), bounds.maxX)
             setFrameOrigin(next.origin)
             crawlAnimationSuppressed = true
+            walkingAnimationDirection = nil
             nextWanderAt = nil
             return
         }
 
         crawlAnimationSuppressed = false
-        let delta = currentWalkSpeed * elapsed * (direction == .right ? 1 : -1)
+        let stepDirection = direction
+        let previousX = next.origin.x
+        let delta = currentWalkSpeed * elapsed * (stepDirection == .right ? 1 : -1)
         next.origin.x += delta
 
         if next.origin.x <= bounds.minX {
@@ -1699,12 +1721,16 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             applyWander(at: now)
         }
 
+        walkingAnimationDirection = MacPetCrawlDirection.direction(
+            forAppliedDeltaX: next.origin.x - previousX,
+            fallback: stepDirection)
         setFrameOrigin(next.origin)
     }
 
     private func resumeWalkingFromCurrentPosition() {
         pauseUntil = nil
         lastTick = nil
+        walkingAnimationDirection = nil
         alignToWalkLane(resetDirection: true)
         startNewWalkSegment(at: Date())
     }
@@ -1714,6 +1740,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             manualInteractionDuringReduced = true
         }
         manualDragDirection = direction
+        walkingAnimationDirection = nil
         if walkingEnabled {
             walkingEnabled = false
             UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
@@ -1737,6 +1764,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     private func finishManualDrag() {
         manualDragDirection = nil
+        walkingAnimationDirection = nil
         saveCurrentPosition()
         updateSpritePresentation(at: Date(), force: true)
     }
@@ -1750,6 +1778,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         pauseUntil = nil
         lastTick = nil
         nextWanderAt = nil
+        walkingAnimationDirection = nil
         crawlAnimationSuppressed = true
         moveToReducedCorner()
     }
@@ -1762,6 +1791,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         pauseUntil = nil
         lastTick = nil
         nextWanderAt = nil
+        walkingAnimationDirection = nil
         crawlAnimationSuppressed = false
 
         if let snapshot, !manualInteractionDuringReduced {
@@ -1806,6 +1836,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         setFrameOrigin(next.origin)
         retainedScreenIdentifier = Self.screenIdentifier(for: screen)
         crawlAnimationSuppressed = bounds.maxX - bounds.minX < Self.minimumWalkableWidth
+        walkingAnimationDirection = nil
         if resetDirection {
             direction = crawlDirection(for: next.origin.x, on: screen)
         }
@@ -1823,8 +1854,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func walkBounds(for screen: NSScreen, frameWidth: CGFloat) -> (minX: CGFloat, maxX: CGFloat) {
-        let minX = screen.visibleFrame.minX
-        return (minX, max(minX, screen.visibleFrame.maxX - frameWidth))
+        MacPetWalkGeometry.walkBounds(
+            visibleFrame: screen.visibleFrame,
+            panelWidth: frameWidth,
+            spriteLaneWidth: Self.spriteWalkLaneWidth)
     }
 
     private func startNewWalkSegment(at now: Date) {
@@ -1857,11 +1890,11 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func applyWander(at now: Date) {
-        if Double.random(in: 0..<1) < 0.45 {
+        if Double.random(in: 0..<1) < 0.65 {
             direction = reversed(direction)
         }
         startNewWalkSegment(at: now)
-        if Double.random(in: 0..<1) < 0.55 {
+        if Double.random(in: 0..<1) < 0.25 {
             pauseUntil = now.addingTimeInterval(Self.randomWanderPause())
         }
     }
@@ -1880,15 +1913,15 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private static func randomEdgePause() -> TimeInterval {
-        Double.random(in: 0.6...1.8)
+        Double.random(in: 0.15...0.45)
     }
 
     private static func randomWanderInterval() -> TimeInterval {
-        Double.random(in: 6...14)
+        Double.random(in: 2.5...6.5)
     }
 
     private static func randomWanderPause() -> TimeInterval {
-        Double.random(in: 0.35...1.1)
+        Double.random(in: 0.12...0.45)
     }
 
     private func clampCurrentPosition() {
@@ -2169,16 +2202,15 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
-        if let manualDragDirection {
-            return manualDragDirection
-        }
-        guard walkingEnabled, presenceMode == .normal, !crawlAnimationSuppressed else {
-            return nil
-        }
-        if let pauseUntil, pauseUntil > now {
-            return nil
-        }
-        return direction
+        let isPaused = pauseUntil.map { $0 > now } ?? false
+        let walkingCanAnimate = walkingEnabled
+            && presenceMode == .normal
+            && !crawlAnimationSuppressed
+            && (walkingAnimationDirection != nil || !isPaused)
+        return MacPetCrawlDirection.activeAnimationDirection(
+            manualDragDirection: manualDragDirection,
+            walkingAnimationDirection: walkingAnimationDirection,
+            walkingCanAnimate: walkingCanAnimate)
     }
 
 }
@@ -2347,7 +2379,7 @@ private struct PetView: View {
                     .offset(y: 7)
                 sprite
             }
-            .frame(width: 220, height: 210)
+            .frame(width: MacPetWalkGeometry.spriteLaneWidth, height: 210)
             .contentShape(Rectangle())
             .onHover { hovering in
                 isHovering = hovering
