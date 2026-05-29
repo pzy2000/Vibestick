@@ -1111,12 +1111,7 @@ final class VibestickViewModel: ObservableObject {
     }
 
     private static func isMenuActivePhase(_ phase: CoderAgentPhase) -> Bool {
-        switch phase {
-        case .running, .reasoning, .toolCalling, .waitingAuthorization, .error, .success:
-            true
-        case .idle, .sleeping, .offline, .unknown:
-            false
-        }
+        PetStateResolver.isActiveTaskPhase(phase)
     }
 
     private func formatStatus(_ status: VibestickStatus, helperPreflight: HelperInstallPreflight) -> String {

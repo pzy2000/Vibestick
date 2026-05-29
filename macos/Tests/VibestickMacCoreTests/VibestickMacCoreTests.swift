@@ -452,36 +452,71 @@ final class VibestickMacCoreTests: XCTestCase {
             "codex")
     }
 
-    func testPetStateResolverMapsActiveCoderPhasesToSpecificMoods() {
+    func testPetStateResolverMapsRunningCoderPhasesToSpecificMoods() {
         let resolver = PetStateResolver()
         let status = vibestickStatus()
 
         XCTAssertEqual(
+            resolver.resolve(status: status, coders: [coderStatus(phase: .running)]).mood,
+            "running")
+        XCTAssertEqual(
+            resolver.resolve(status: status, coders: [coderStatus(phase: .reasoning)]).mood,
+            "reasoning")
+        XCTAssertEqual(
             resolver.resolve(status: status, coders: [coderStatus(phase: .toolCalling)]).mood,
             "tool_calling")
-        XCTAssertEqual(
-            resolver.resolve(status: status, coders: [coderStatus(phase: .waitingAuthorization)]).mood,
-            "waiting")
-        XCTAssertEqual(
-            resolver.resolve(status: status, coders: [coderStatus(phase: .success)]).mood,
-            "success")
-        XCTAssertEqual(
-            resolver.resolve(status: status, coders: [coderStatus(phase: .error)]).mood,
-            "error")
     }
 
-    func testPetStateResolverUsesLowBatteryMoodWhenNoCoderIsActive() {
+    func testPetStateResolverSleepsForNonRunningCoderPhases() {
+        let resolver = PetStateResolver()
+        let status = vibestickStatus()
+        let nonRunningPhases: [CoderAgentPhase] = [
+            .idle,
+            .sleeping,
+            .waitingAuthorization,
+            .error,
+            .success,
+            .offline,
+            .unknown
+        ]
+
+        for phase in nonRunningPhases {
+            XCTAssertEqual(
+                resolver.resolve(status: status, coders: [coderStatus(phase: phase)]).mood,
+                "idle",
+                "\(phase.rawValue) should be a resting pet mood")
+        }
+    }
+
+    func testPetStateResolverUsesRunningCoderOverNonRunningCoder() {
+        let resolver = PetStateResolver()
+        let status = vibestickStatus()
+
+        XCTAssertEqual(
+            resolver.resolve(status: status, coders: [
+                coderStatus(phase: .waitingAuthorization),
+                coderStatus(phase: .error),
+                coderStatus(phase: .running)
+            ]).mood,
+            "running")
+    }
+
+    func testPetStateResolverRestsWhenNoCoderIsRunningDespiteSystemState() {
         let resolver = PetStateResolver()
         let lowBattery = vibestickStatus(
             battery: BatteryInfo(percentage: 20, isACConnected: false, isAvailable: true))
         let chargingLowBattery = vibestickStatus(
             battery: BatteryInfo(percentage: 10, isACConnected: true, isAvailable: true))
+        let hyperLowBattery = vibestickStatus(
+            activeMode: .hyper,
+            battery: BatteryInfo(percentage: 10, isACConnected: false, isAvailable: true))
 
-        XCTAssertEqual(resolver.resolve(status: lowBattery, coders: []).mood, "low_battery")
+        XCTAssertEqual(resolver.resolve(status: lowBattery, coders: []).mood, "idle")
         XCTAssertEqual(resolver.resolve(status: chargingLowBattery, coders: []).mood, "idle")
+        XCTAssertEqual(resolver.resolve(status: hyperLowBattery, coders: []).mood, "idle")
     }
 
-    func testPetStateResolverKeepsActiveWorkAndHyperAboveLowBattery() {
+    func testPetStateResolverKeepsRunningWorkAboveSystemState() {
         let resolver = PetStateResolver()
         let lowBattery = vibestickStatus(
             battery: BatteryInfo(percentage: 10, isACConnected: false, isAvailable: true))
@@ -492,7 +527,9 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(
             resolver.resolve(status: lowBattery, coders: [coderStatus(phase: .toolCalling)]).mood,
             "tool_calling")
-        XCTAssertEqual(resolver.resolve(status: hyperLowBattery, coders: []).mood, "power")
+        XCTAssertEqual(
+            resolver.resolve(status: hyperLowBattery, coders: [coderStatus(phase: .reasoning)]).mood,
+            "reasoning")
     }
 
     func testCompositeCoderStatusSourcePreservesMultipleSessionsForSameAgent() {
