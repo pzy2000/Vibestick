@@ -40,9 +40,13 @@ clear_bundle_xattrs() {
   local bundle="$1"
   if command -v xattr >/dev/null 2>&1; then
     xattr -cr "$bundle" || true
-    find "$bundle" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} + 2>/dev/null || true
-    find "$bundle" -exec xattr -d com.apple.FinderInfo {} + 2>/dev/null || true
-    find "$bundle" -exec xattr -d com.apple.ResourceFork {} + 2>/dev/null || true
+    find "$bundle" -exec sh -c '
+      for path do
+        xattr -d "com.apple.fileprovider.fpfs#P" "$path" 2>/dev/null || true
+        xattr -d com.apple.FinderInfo "$path" 2>/dev/null || true
+        xattr -d com.apple.ResourceFork "$path" 2>/dev/null || true
+      done
+    ' sh {} +
   fi
 }
 

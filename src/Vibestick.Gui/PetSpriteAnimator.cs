@@ -43,7 +43,8 @@ public sealed class PetSpriteAnimator
 
     private readonly Image _image;
     private readonly TextBlock _fallback;
-    private readonly BitmapSource? _sheet;
+    private BitmapSource? _sheet;
+    private string? _sheetPath;
     private readonly ScaleTransform _directionTransform = new(1, 1);
     private readonly TranslateTransform _motionTransform = new();
     private readonly Random _random = CreateRandom();
@@ -60,8 +61,8 @@ public sealed class PetSpriteAnimator
     {
         _image = image;
         _fallback = fallback;
-        _sheet = LoadSheet();
         _activeClip = Clip("seated_blink");
+        SetSpritesheet(Path.Combine(AppContext.BaseDirectory, "Assets", "PetSprites", "golden-shaded-cat-spritesheet.cleaned.png"));
         _nextRandomActionAtUtc = DateTimeOffset.UtcNow +
             (_useSeededFastSchedule ? TimeSpan.FromMilliseconds(900) : DefaultRandomDelay);
         var transformGroup = new TransformGroup();
@@ -69,8 +70,6 @@ public sealed class PetSpriteAnimator
         transformGroup.Children.Add(_motionTransform);
         _image.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
         _image.RenderTransform = transformGroup;
-        _image.Visibility = _sheet is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
-        _fallback.Visibility = _sheet is null ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
         Render();
     }
 
@@ -79,6 +78,21 @@ public sealed class PetSpriteAnimator
     public TimeSpan CurrentFrameInterval => _activeClip.FrameInterval;
 
     public int CatalogFrameCount => CatalogFrameTotal;
+
+    public void SetSpritesheet(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (string.Equals(_sheetPath, fullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _sheetPath = fullPath;
+        _sheet = LoadSheet(fullPath);
+        _image.Visibility = _sheet is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+        _fallback.Visibility = _sheet is null ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        Render();
+    }
 
     public void SetMood(PetMood mood)
     {
@@ -285,9 +299,8 @@ public sealed class PetSpriteAnimator
         };
     }
 
-    private static BitmapSource? LoadSheet()
+    private static BitmapSource? LoadSheet(string path)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "PetSprites", "golden-shaded-cat-spritesheet.cleaned.png");
         if (!System.IO.File.Exists(path))
         {
             return null;

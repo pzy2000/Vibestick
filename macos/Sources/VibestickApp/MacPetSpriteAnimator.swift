@@ -319,6 +319,7 @@ final class MacPetSpriteLayerView: NSView {
     private let spriteLayer = CALayer()
     private let fallbackLayer = CATextLayer()
     private var currentPresentation: MacPetSpritePresentation?
+    private var currentSpritesheetURL: URL?
 
     init() {
         super.init(frame: NSRect(origin: .zero, size: Self.spriteSize))
@@ -333,14 +334,14 @@ final class MacPetSpriteLayerView: NSView {
         spriteLayer.minificationFilter = .nearest
         layer?.addSublayer(spriteLayer)
 
-        fallbackLayer.string = "missing cat sprite"
+        fallbackLayer.string = "missing pet sprite"
         fallbackLayer.alignmentMode = .center
         fallbackLayer.foregroundColor = NSColor.labelColor.cgColor
         fallbackLayer.fontSize = 12
         fallbackLayer.isHidden = true
         layer?.addSublayer(fallbackLayer)
 
-        loadSpritesheet()
+        setSpritesheetURL(PetLibrary.defaultBuiltInSpritesheetURL())
     }
 
     @available(*, unavailable)
@@ -358,8 +359,17 @@ final class MacPetSpriteLayerView: NSView {
         applyCurrentPresentation()
     }
 
-    private func loadSpritesheet() {
-        guard let url = Self.spriteURL(),
+    func setSpritesheetURL(_ url: URL?) {
+        guard currentSpritesheetURL != url else {
+            return
+        }
+        currentSpritesheetURL = url
+        loadSpritesheet(url)
+        applyCurrentPresentation()
+    }
+
+    private func loadSpritesheet(_ url: URL?) {
+        guard let url,
               let image = NSImage(contentsOf: url),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
         else {
@@ -391,27 +401,6 @@ final class MacPetSpriteLayerView: NSView {
         spriteLayer.transform = CATransform3DMakeScale(presentation.horizontalScale, 1, 1)
     }
 
-    private static func spriteURL() -> URL? {
-        if let resourceURL = Bundle.main.resourceURL?
-            .appendingPathComponent("VibestickMac_VibestickApp.bundle", isDirectory: true),
-           let bundle = Bundle(url: resourceURL),
-           let url = spriteURL(in: bundle)
-        {
-            return url
-        }
-
-        return spriteURL(in: Bundle.module)
-    }
-
-    private static func spriteURL(in bundle: Bundle) -> URL? {
-        bundle.url(
-            forResource: "golden-shaded-cat-spritesheet.cleaned",
-            withExtension: "png",
-            subdirectory: "PetSprites")
-            ?? bundle.url(
-                forResource: "golden-shaded-cat-spritesheet.cleaned",
-                withExtension: "png")
-    }
 }
 
 private struct PetSpriteFrameRef {

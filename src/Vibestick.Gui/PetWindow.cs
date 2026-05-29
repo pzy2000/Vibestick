@@ -69,6 +69,8 @@ public sealed class PetWindow : Window
     private readonly PetWindowStateStore _placementStore;
     private readonly Action _openControlPanel;
     private readonly Action _hidePet;
+    private readonly Action _importPet;
+    private readonly Action _exportPet;
     private readonly Action _exitApplication;
     private readonly DispatcherTimer _statusTimer;
     private readonly DispatcherTimer _statusDebounceTimer;
@@ -126,6 +128,8 @@ public sealed class PetWindow : Window
         GuiRuntimeState runtimeState,
         Action openControlPanel,
         Action hidePet,
+        Action importPet,
+        Action exportPet,
         Action exitApplication,
         PetWindowStateStore? placementStore = null)
     {
@@ -133,6 +137,8 @@ public sealed class PetWindow : Window
         _runtimeState = runtimeState;
         _openControlPanel = openControlPanel;
         _hidePet = hidePet;
+        _importPet = importPet;
+        _exportPet = exportPet;
         _exitApplication = exitApplication;
         _placementStore = placementStore ?? new PetWindowStateStore();
 
@@ -262,6 +268,25 @@ public sealed class PetWindow : Window
         }
     }
 
+    public void ReloadPetSprite()
+    {
+        _spriteAnimator.SetSpritesheet(_services.PetLibrary.GetCurrentPet().SpritesheetPath);
+        WriteRuntimeSnapshot(_currentState ?? _services.PetStateResolver.Resolve(
+            new VibestickStatus(
+                VibestickMode.Off,
+                RestorePending: false,
+                LastAppliedSchemeGuid: null,
+                OriginalPolicy: null,
+                CurrentSchemeGuid: null,
+                CurrentPolicy: null,
+                Battery: new BatteryInfo(null, IsAcConnected: false, IsAvailable: false),
+                LongTasks: Array.Empty<LongTaskProcess>(),
+                Warnings: Array.Empty<string>()),
+            Array.Empty<CoderAgentStatus>(),
+            _runtimeState.IsHyperGuardRunning,
+            DateTimeOffset.UtcNow));
+    }
+
     private UIElement BuildLayout(Image sprite, TextBlock fallback)
     {
         var root = new Grid
@@ -374,6 +399,14 @@ public sealed class PetWindow : Window
         refresh.Click += async (_, _) => await RefreshNowAsync().ConfigureAwait(true);
         menu.Items.Add(refresh);
 
+        var importPet = new MenuItem { Header = "Import Pet..." };
+        importPet.Click += (_, _) => _importPet();
+        menu.Items.Add(importPet);
+
+        var exportPet = new MenuItem { Header = "Export Current Pet..." };
+        exportPet.Click += (_, _) => _exportPet();
+        menu.Items.Add(exportPet);
+
         _walkingToggleMenuItem.Click += (_, _) => ToggleWalking();
         UpdateWalkingMenuText();
         menu.Items.Add(_walkingToggleMenuItem);
@@ -432,6 +465,8 @@ public sealed class PetWindow : Window
     private void Render(PetState state)
     {
         _currentState = state;
+        var pet = _services.PetLibrary.GetCurrentPet();
+        _spriteAnimator.SetSpritesheet(pet.SpritesheetPath);
         _spriteAnimator.SetMood(state.Mood);
         Title = $"Vibestick Pet - {state.Mood}";
         SetNativeTitle(Title);
@@ -1389,6 +1424,7 @@ public sealed class PetWindow : Window
         try
         {
             var now = DateTimeOffset.UtcNow;
+            var pet = _services.PetLibrary.GetCurrentPet();
             Directory.CreateDirectory(_services.CoderStatusDirectory);
             var snapshot = new
             {
@@ -1400,6 +1436,12 @@ public sealed class PetWindow : Window
                 Width,
                 Height,
                 Scale = _scale,
+                Pet = new
+                {
+                    pet.Id,
+                    pet.DisplayName,
+                    pet.IsBuiltIn
+                },
                 Sprite = _spriteAnimator.CurrentFrame,
                 Walking = new
                 {

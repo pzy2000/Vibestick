@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import VibestickMacCore
 
 @main
@@ -255,6 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var petCardModeMenuItem: NSMenuItem?
     private var petFocusModeMenuItem: NSMenuItem?
     private var petResetPositionMenuItem: NSMenuItem?
+    private var petLibrarySummaryMenuItem: NSMenuItem?
     private var petWindow: PetPanel?
     private var screenParametersObserver: NSObjectProtocol?
     private var focusMonitor: PetFocusMonitor?
@@ -263,6 +265,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         viewModel.menuStateDidChange = { [weak self] in
+            self?.updateStatusItemState()
+        }
+        viewModel.petLibraryChanged = { [weak self] in
+            self?.petWindow?.reloadPetSprite()
             self?.updateStatusItemState()
         }
         setupStatusItem()
@@ -315,6 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(focusSummary)
         focusSummaryMenuItem = focusSummary
 
+        let petLibrarySummary = disabledMenuItem("")
+        menu.addItem(petLibrarySummary)
+        petLibrarySummaryMenuItem = petLibrarySummary
+
         menu.addItem(.separator())
 
         let openControlPanel = NSMenuItem(title: "打开控制面板", action: #selector(openControlPanel), keyEquivalent: "")
@@ -349,6 +359,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         resetPosition.target = self
         menu.addItem(resetPosition)
         petResetPositionMenuItem = resetPosition
+
+        let importPet = NSMenuItem(title: "导入宠物...", action: #selector(importPetAction), keyEquivalent: "")
+        importPet.target = self
+        menu.addItem(importPet)
+
+        let exportPet = NSMenuItem(title: "导出当前宠物...", action: #selector(exportPetAction), keyEquivalent: "")
+        exportPet.target = self
+        menu.addItem(exportPet)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
@@ -397,12 +415,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cycleFocusPreference()
     }
 
+    @objc private func importPetAction() {
+        viewModel.importPetFromDialog()
+    }
+
+    @objc private func exportPetAction() {
+        viewModel.exportCurrentPetFromDialog()
+    }
+
     private func showPet() {
         if petWindow == nil {
             petWindow = PetPanel(
                 viewModel: viewModel,
                 openControlPanel: { [weak self] in self?.openControlPanel() },
                 hidePet: { [weak self] in self?.hidePet() },
+                importPet: { [weak self] in self?.viewModel.importPetFromDialog() },
+                exportPet: { [weak self] in self?.viewModel.exportCurrentPetFromDialog() },
                 quitApplication: { [weak self] in self?.quit() },
                 cycleFocusPreference: { [weak self] in self?.cycleFocusPreference() },
                 focusActionTitle: { [weak self] in self?.focusActionTitle ?? "勿扰模式：自动" },
@@ -461,6 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         petSummaryMenuItem?.title = "桌宠：\(petWindow?.isVisible == true ? "显示" : "隐藏")"
         walkingSummaryMenuItem?.title = "行走：\((petWindow?.isWalkingEnabled ?? PetPanel.savedWalkingEnabled) ? "行走中" : "暂停")"
         focusSummaryMenuItem?.title = "勿扰：\(focusSummaryText)"
+        petLibrarySummaryMenuItem?.title = "宠物：\(viewModel.currentPet.displayName)"
     }
 
     private func updateStatusIcon() {
@@ -613,6 +642,10 @@ final class VibestickViewModel: ObservableObject {
     @Published var petTitle = "Vibestick"
     @Published var petMessage = "正在读取状态..."
     @Published var petCoders: [CoderAgentStatus] = []
+    @Published var pets: [PetDefinition] = []
+    @Published var currentPet: PetDefinition
+    @Published var petLibraryMessage = ""
+    @Published var petPreviewImage: NSImage?
     @Published var helperInstallMessage = ""
     @Published var isInstallingHelper = false
     @Published var firstLaunchInstallText = ""
@@ -623,6 +656,7 @@ final class VibestickViewModel: ObservableObject {
     @Published var deviceWatcherMessage = ""
     @Published var isInstallingDeviceWatcher = false
     var menuStateDidChange: (() -> Void)?
+    var petLibraryChanged: (() -> Void)?
     private(set) var activeTaskCount = 0
 
     private let assertionManager: MacSleepAssertionManager
@@ -631,6 +665,7 @@ final class VibestickViewModel: ObservableObject {
     private let firstLaunchInstaller: FirstLaunchInstaller
     private let helperInstaller: HelperInstalling
     private let deviceWatcherInstaller: DeviceWatcherInstalling
+    let petLibrary: PetLibrary
     private let coderSource: CompositeCoderStatusSource
     private let codexStatusBridge: CodexSessionStatusBridge?
     private let petResolver = PetStateResolver()
@@ -666,9 +701,12 @@ final class VibestickViewModel: ObservableObject {
         let assertionManager = MacSleepAssertionManager()
         let helperInstaller = MacHelperInstaller()
         let deviceWatcherInstaller = MacDeviceWatcherInstaller()
+        let petLibrary = PetLibrary()
         self.assertionManager = assertionManager
         self.helperInstaller = helperInstaller
         self.deviceWatcherInstaller = deviceWatcherInstaller
+        self.petLibrary = petLibrary
+        self.currentPet = petLibrary.currentPet()
         self.firstLaunchInstaller = FirstLaunchInstaller(
             appPath: Bundle.main.bundleURL.path,
             helperInstaller: helperInstaller,
@@ -693,6 +731,7 @@ final class VibestickViewModel: ObservableObject {
             ProcessCoderStatusSource(processInspector: processInspector, processNames: VibestickOptions().longTaskProcessNames)
         ])
         self.codexStatusBridge?.start()
+        self.refreshPetLibrary()
         self.refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
@@ -703,6 +742,139 @@ final class VibestickViewModel: ObservableObject {
     func refresh() {
         refreshCoderPet()
         refreshSystemStatus()
+        refreshPetLibrary()
+    }
+
+    func refreshPetLibrary() {
+        pets = petLibrary.pets()
+        currentPet = petLibrary.currentPet()
+        petPreviewImage = petLibrary.previewImage(for: currentPet)
+        menuStateDidChange?()
+    }
+
+    func selectPet(id: String) {
+        do {
+            try petLibrary.selectPet(id: id)
+            petLibraryMessage = "已切换到 \(petLibrary.currentPet().displayName)。"
+            refreshPetLibrary()
+            petLibraryChanged?()
+        } catch {
+            petLibraryMessage = friendlyError(error.localizedDescription)
+            refreshPetLibrary()
+        }
+    }
+
+    func importPetFromDialog() {
+        let panel = NSOpenPanel()
+        panel.title = "导入 Vibestick 宠物"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.zip, .png, .webP]
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        importPet(from: url, replace: false, metadata: nil)
+    }
+
+    func exportCurrentPetFromDialog() {
+        let pet = currentPet
+        let panel = NSSavePanel()
+        panel.title = "导出 Vibestick 宠物"
+        panel.nameFieldStringValue = "\(pet.id).vibestick-pet.zip"
+        panel.allowedContentTypes = [.zip]
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            try petLibrary.exportPet(id: pet.id, to: url)
+            petLibraryMessage = "已导出 \(pet.displayName)。"
+        } catch {
+            petLibraryMessage = friendlyError(error.localizedDescription)
+        }
+    }
+
+    func deleteCurrentCustomPet() {
+        guard !currentPet.isBuiltIn else {
+            petLibraryMessage = "内置宠物不能删除。"
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "删除 \(currentPet.displayName)？"
+        alert.informativeText = "此操作不能撤销。"
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        do {
+            try petLibrary.deleteCustomPet(id: currentPet.id)
+            petLibraryMessage = "已删除自定义宠物，已切回内置宠物。"
+            refreshPetLibrary()
+            petLibraryChanged?()
+        } catch {
+            petLibraryMessage = friendlyError(error.localizedDescription)
+        }
+    }
+
+    private func importPet(from url: URL, replace: Bool, metadata: PetImportMetadata?) {
+        do {
+            let imported: PetDefinition
+            if ["png", "webp"].contains(url.pathExtension.lowercased()) {
+                guard let metadata = metadata ?? promptPetMetadata(suggestedName: url.deletingPathExtension().lastPathComponent) else {
+                    return
+                }
+                imported = try petLibrary.importRawAtlas(url, metadata: metadata, replace: replace)
+            } else {
+                imported = try petLibrary.importPackage(url, replace: replace)
+            }
+
+            petLibraryMessage = "已导入并切换到 \(imported.displayName)。"
+            refreshPetLibrary()
+            petLibraryChanged?()
+        } catch PetLibraryError.duplicate(let id) {
+            let alert = NSAlert()
+            alert.messageText = "宠物“\(id)”已存在。"
+            alert.informativeText = "是否替换已有宠物？"
+            alert.addButton(withTitle: "替换")
+            alert.addButton(withTitle: "取消")
+            alert.alertStyle = .warning
+            if alert.runModal() == .alertFirstButtonReturn {
+                importPet(from: url, replace: true, metadata: metadata)
+            }
+        } catch {
+            petLibraryMessage = friendlyError(error.localizedDescription)
+        }
+    }
+
+    private func promptPetMetadata(suggestedName: String) -> PetImportMetadata? {
+        let nameField = NSTextField(string: suggestedName.isEmpty ? "Imported Pet" : suggestedName)
+        let descriptionField = NSTextField(string: "Imported Vibestick pet.")
+        nameField.frame = NSRect(x: 0, y: 34, width: 280, height: 24)
+        descriptionField.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 62))
+        container.addSubview(nameField)
+        container.addSubview(descriptionField)
+
+        let alert = NSAlert()
+        alert.messageText = "导入宠物 Atlas"
+        alert.informativeText = "填写宠物名称和描述。"
+        alert.accessoryView = container
+        alert.addButton(withTitle: "导入")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+
+        return PetImportMetadata(
+            displayName: nameField.stringValue,
+            description: descriptionField.stringValue)
     }
 
     private func refreshCoderPet() {
@@ -1127,6 +1299,52 @@ struct ControlPanelView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 10) {
+                Text("宠物库")
+                    .font(.headline)
+                HStack(alignment: .center, spacing: 12) {
+                    if let image = viewModel.petPreviewImage {
+                        Image(nsImage: image)
+                            .interpolation(.none)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 54, height: 58)
+                    } else {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.secondary.opacity(0.16))
+                            .frame(width: 54, height: 58)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(viewModel.currentPet.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(viewModel.currentPet.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                Picker("当前宠物", selection: Binding(
+                    get: { viewModel.currentPet.id },
+                    set: { viewModel.selectPet(id: $0) }))
+                {
+                    ForEach(viewModel.pets) { pet in
+                        Text(pet.isBuiltIn ? "\(pet.displayName)（内置）" : pet.displayName)
+                            .tag(pet.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                HStack {
+                    Button("导入宠物") { viewModel.importPetFromDialog() }
+                    Button("导出当前") { viewModel.exportCurrentPetFromDialog() }
+                    Button("删除自定义") { viewModel.deleteCurrentCustomPet() }
+                        .disabled(viewModel.currentPet.isBuiltIn)
+                }
+                if !viewModel.petLibraryMessage.isEmpty {
+                    Text(viewModel.petLibraryMessage)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             ScrollView {
                 Text(viewModel.doctorText)
                     .font(.system(.caption, design: .monospaced))
@@ -1203,6 +1421,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private let viewModel: VibestickViewModel
     private let openControlPanel: () -> Void
     private let hidePet: () -> Void
+    private let importPet: () -> Void
+    private let exportPet: () -> Void
     private let quitApplication: () -> Void
     private let cycleFocusPreference: () -> Void
     private let focusActionTitle: () -> String
@@ -1236,6 +1456,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         viewModel: VibestickViewModel,
         openControlPanel: @escaping () -> Void,
         hidePet: @escaping () -> Void,
+        importPet: @escaping () -> Void,
+        exportPet: @escaping () -> Void,
         quitApplication: @escaping () -> Void,
         cycleFocusPreference: @escaping () -> Void,
         focusActionTitle: @escaping () -> String,
@@ -1244,6 +1466,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         self.viewModel = viewModel
         self.openControlPanel = openControlPanel
         self.hidePet = hidePet
+        self.importPet = importPet
+        self.exportPet = exportPet
         self.quitApplication = quitApplication
         self.cycleFocusPreference = cycleFocusPreference
         self.focusActionTitle = focusActionTitle
@@ -1382,6 +1606,11 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     func refreshFocusPreferenceMenuText() {
         updateFocusModeMenuText()
+    }
+
+    func reloadPetSprite() {
+        spriteLayerView.setSpritesheetURL(viewModel.currentPet.spritesheetURL)
+        updateSpritePresentation(at: Date(), force: true)
     }
 
     func resetPetPosition() {
@@ -1721,6 +1950,14 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         hide.target = self
         menu.addItem(hide)
 
+        let importPet = NSMenuItem(title: "导入宠物...", action: #selector(importPetFromMenu), keyEquivalent: "")
+        importPet.target = self
+        menu.addItem(importPet)
+
+        let exportPet = NSMenuItem(title: "导出当前宠物...", action: #selector(exportPetFromMenu), keyEquivalent: "")
+        exportPet.target = self
+        menu.addItem(exportPet)
+
         menu.addItem(.separator())
 
         let exit = NSMenuItem(title: "退出 Vibestick", action: #selector(quitFromMenu), keyEquivalent: "")
@@ -1757,6 +1994,14 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     @objc private func hidePetFromMenu() {
         hidePet()
+    }
+
+    @objc private func importPetFromMenu() {
+        importPet()
+    }
+
+    @objc private func exportPetFromMenu() {
+        exportPet()
     }
 
     private func updateWalkingMenuText() {
@@ -1907,6 +2152,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func updateSpritePresentation(at now: Date, force: Bool = false) {
+        spriteLayerView.setSpritesheetURL(viewModel.currentPet.spritesheetURL)
         let moodChanged = spriteAnimator.setMood(viewModel.petMood)
         let hoverChanged = spriteAnimator.setHovering(spriteHovering)
         let directionChanged = spriteAnimator.setCrawlDirection(activeCrawlDirection(at: now))

@@ -6,7 +6,9 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using Vibestick.Core;
 using Application = System.Windows.Application;
 using Button = System.Windows.Controls.Button;
@@ -16,8 +18,10 @@ using ColorConverter = System.Windows.Media.ColorConverter;
 using Drawing = System.Drawing;
 using FontFamily = System.Windows.Media.FontFamily;
 using Forms = System.Windows.Forms;
+using Image = System.Windows.Controls.Image;
 using MessageBox = System.Windows.MessageBox;
 using Panel = System.Windows.Controls.Panel;
+using ComboBox = System.Windows.Controls.ComboBox;
 using TextBox = System.Windows.Controls.TextBox;
 
 namespace Vibestick.Gui;
@@ -33,6 +37,7 @@ public sealed class App : Application
     private Forms.ToolStripMenuItem? _petToggleTrayMenuItem;
     private string? _placementPath;
     private string? _panelLayoutSnapshotPath;
+    private Window? DialogOwner => _mainWindow is not null ? _mainWindow : _petWindow;
 
     public App(string[] args)
     {
@@ -113,6 +118,8 @@ public sealed class App : Application
             _runtimeState,
             ShowControlPanel,
             HidePet,
+            ImportPetFromDialog,
+            ExportCurrentPetFromDialog,
             () => Shutdown(0),
             new PetWindowStateStore(_placementPath));
         _petWindow.Closed += (_, _) =>
@@ -161,7 +168,7 @@ public sealed class App : Application
             return;
         }
 
-        _mainWindow = new MainWindow(_services, _runtimeState, _panelLayoutSnapshotPath);
+        _mainWindow = new MainWindow(_services, _runtimeState, OnPetLibraryChanged, _panelLayoutSnapshotPath);
         _mainWindow.Closed += (_, _) => _mainWindow = null;
         _mainWindow.Show();
     }
@@ -179,9 +186,136 @@ public sealed class App : Application
         _notifyIcon.ContextMenuStrip.Items.Add("Open Control Panel", null, (_, _) => Dispatcher.Invoke(ShowControlPanel));
         _petToggleTrayMenuItem = new Forms.ToolStripMenuItem("Hide Pet", null, (_, _) => Dispatcher.Invoke(TogglePet));
         _notifyIcon.ContextMenuStrip.Items.Add(_petToggleTrayMenuItem);
+        _notifyIcon.ContextMenuStrip.Items.Add("Import Pet...", null, (_, _) => Dispatcher.Invoke(ImportPetFromDialog));
+        _notifyIcon.ContextMenuStrip.Items.Add("Export Current Pet...", null, (_, _) => Dispatcher.Invoke(ExportCurrentPetFromDialog));
         UpdateTrayPetToggleText();
         _notifyIcon.ContextMenuStrip.Items.Add("Exit Vibestick", null, (_, _) => Dispatcher.Invoke(() => Shutdown(0)));
         _notifyIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowControlPanel);
+    }
+
+    private void OnPetLibraryChanged()
+    {
+        _mainWindow?.RefreshPetLibraryUi();
+        _petWindow?.ReloadPetSprite();
+    }
+
+    private void ImportPetFromDialog()
+    {
+        if (_services is null)
+        {
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "Import Vibestick Pet",
+            Filter = "Vibestick pets and atlases|*.vibestick-pet.zip;*.zip;*.png;*.webp|All files|*.*",
+            Multiselect = false
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        ImportPetFile(dialog.FileName, replace: false, metadata: null);
+    }
+
+    private void ImportPetFile(string path, bool replace, PetImportMetadata? metadata)
+    {
+        if (_services is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var extension = Path.GetExtension(path);
+            PetDefinition imported;
+            if (extension.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                extension.Equals(".webp", StringComparison.OrdinalIgnoreCase))
+            {
+                metadata ??= PetMetadataDialog.Prompt(DialogOwner, Path.GetFileNameWithoutExtension(path));
+                if (metadata is null)
+                {
+                    return;
+                }
+                imported = _services.PetLibrary.ImportRawAtlas(path, metadata, replace);
+            }
+            else
+            {
+                imported = _services.PetLibrary.ImportPackage(path, replace);
+            }
+
+            OnPetLibraryChanged();
+            MessageBox.Show(
+                DialogOwner,
+                $"Imported and switched to {imported.DisplayName}.",
+                "Vibestick",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (PetLibraryDuplicateException duplicate)
+        {
+            var answer = MessageBox.Show(
+                DialogOwner,
+                $"Pet '{duplicate.PetId}' already exists. Replace it?",
+                "Vibestick",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (answer == MessageBoxResult.Yes)
+            {
+                ImportPetFile(path, replace: true, metadata);
+            }
+        }
+        catch (PetLibraryException exception)
+        {
+            MessageBox.Show(
+                DialogOwner,
+                exception.Message,
+                "Vibestick",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private void ExportCurrentPetFromDialog()
+    {
+        if (_services is null)
+        {
+            return;
+        }
+
+        var current = _services.PetLibrary.GetCurrentPet();
+        var dialog = new SaveFileDialog
+        {
+            Title = "Export Vibestick Pet",
+            FileName = $"{current.Id}.vibestick-pet.zip",
+            Filter = "Vibestick pet package|*.vibestick-pet.zip|Zip archive|*.zip"
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            _services.PetLibrary.ExportPet(current.Id, dialog.FileName);
+            MessageBox.Show(
+                DialogOwner,
+                $"Exported {current.DisplayName}.",
+                "Vibestick",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (PetLibraryException exception)
+        {
+            MessageBox.Show(
+                DialogOwner,
+                exception.Message,
+                "Vibestick",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
     }
 
     private void UpdateTrayPetToggleText()
@@ -223,6 +357,7 @@ public sealed class MainWindow : Window
 
     private readonly GuiServices _services;
     private readonly GuiRuntimeState _runtimeState;
+    private readonly Action _petLibraryChanged;
     private readonly DispatcherTimer _hyperTimer;
     private IDisposable? _sleepBlock;
 
@@ -244,6 +379,12 @@ public sealed class MainWindow : Window
     private readonly Button _hyperButton = new();
     private readonly Button _stopHyperButton = new();
     private readonly Button _revertButton = new();
+    private readonly ComboBox _petSelector = new();
+    private readonly TextBlock _petLibraryText = new();
+    private readonly Image _petPreview = new();
+    private readonly Button _importPetButton = new();
+    private readonly Button _exportPetButton = new();
+    private readonly Button _deletePetButton = new();
     private readonly DispatcherTimer _watchTimer;
     private VibestickStatus? _lastStatus;
     private DoctorReport? _lastDoctorReport;
@@ -251,11 +392,17 @@ public sealed class MainWindow : Window
     private DateTimeOffset? _lastRefreshAt;
     private DateTimeOffset? _lastSafetyCheckAt;
     private readonly string? _panelLayoutSnapshotPath;
+    private bool _isRefreshingPetLibraryUi;
 
-    public MainWindow(GuiServices services, GuiRuntimeState runtimeState, string? panelLayoutSnapshotPath = null)
+    public MainWindow(
+        GuiServices services,
+        GuiRuntimeState runtimeState,
+        Action? petLibraryChanged = null,
+        string? panelLayoutSnapshotPath = null)
     {
         _services = services;
         _runtimeState = runtimeState;
+        _petLibraryChanged = petLibraryChanged ?? (() => { });
         _panelLayoutSnapshotPath = panelLayoutSnapshotPath;
         _hyperTimer = new DispatcherTimer
         {
@@ -281,6 +428,7 @@ public sealed class MainWindow : Window
         {
             _watchTimer.Start();
             await RefreshStatusAsync("Ready.").ConfigureAwait(true);
+            RefreshPetLibraryUi();
             await WritePanelLayoutSnapshotAsync().ConfigureAwait(true);
         };
         Closed += async (_, _) =>
@@ -382,7 +530,10 @@ public sealed class MainWindow : Window
             CornerRadius = new CornerRadius(8),
             Child = controls
         };
-        body.Children.Add(controlsPanel);
+        var leftPanel = new StackPanel();
+        leftPanel.Children.Add(controlsPanel);
+        leftPanel.Children.Add(BuildPetLibraryPanel());
+        body.Children.Add(leftPanel);
 
         var outputGrid = new Grid();
         outputGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(170) });
@@ -409,6 +560,239 @@ public sealed class MainWindow : Window
 
         SetGuardUi();
         return root;
+    }
+
+    private UIElement BuildPetLibraryPanel()
+    {
+        var root = new StackPanel();
+
+        var title = new TextBlock
+        {
+            Text = "Pet Library",
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brush("#172033"),
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        root.Children.Add(title);
+
+        var current = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+        _petPreview.Width = 54;
+        _petPreview.Height = 58;
+        _petPreview.Stretch = Stretch.Uniform;
+        _petPreview.Margin = new Thickness(0, 0, 10, 0);
+        DockPanel.SetDock(_petPreview, Dock.Left);
+        current.Children.Add(_petPreview);
+
+        _petLibraryText.FontSize = 12;
+        _petLibraryText.Foreground = Brush("#172033");
+        _petLibraryText.TextWrapping = TextWrapping.Wrap;
+        current.Children.Add(_petLibraryText);
+        root.Children.Add(current);
+
+        _petSelector.Margin = new Thickness(0, 0, 0, 10);
+        _petSelector.DisplayMemberPath = nameof(PetSelectorItem.Label);
+        _petSelector.SelectionChanged += (_, _) =>
+        {
+            if (_isRefreshingPetLibraryUi || _petSelector.SelectedItem is not PetSelectorItem item)
+            {
+                return;
+            }
+
+            try
+            {
+                _services.PetLibrary.SelectPet(item.Id);
+                RefreshPetLibraryUi();
+                _petLibraryChanged();
+            }
+            catch (PetLibraryException exception)
+            {
+                MessageBox.Show(this, exception.Message, "Vibestick", MessageBoxButton.OK, MessageBoxImage.Error);
+                RefreshPetLibraryUi();
+            }
+        };
+        root.Children.Add(_petSelector);
+
+        var actions = new UniformGrid
+        {
+            Columns = 1,
+            Rows = 3
+        };
+        AddActionButton(actions, _importPetButton, "Import Pet", ImportPetAsync);
+        AddActionButton(actions, _exportPetButton, "Export Current", ExportCurrentPetAsync);
+        AddActionButton(actions, _deletePetButton, "Delete Custom Pet", DeleteSelectedPetAsync);
+        root.Children.Add(actions);
+
+        return new Border
+        {
+            Margin = new Thickness(0, 14, 0, 0),
+            Padding = new Thickness(14),
+            Background = Brushes.White,
+            BorderBrush = Brush("#e1e5ee"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Child = root
+        };
+    }
+
+    public void RefreshPetLibraryUi()
+    {
+        _isRefreshingPetLibraryUi = true;
+        try
+        {
+            var pets = _services.PetLibrary.GetPets();
+            var current = _services.PetLibrary.GetCurrentPet();
+            _petSelector.ItemsSource = pets
+                .Select(static pet => new PetSelectorItem(
+                    pet.Id,
+                    pet.IsBuiltIn ? $"{pet.DisplayName} (Built-in)" : pet.DisplayName))
+                .ToArray();
+            _petSelector.SelectedItem = _petSelector.Items
+                .OfType<PetSelectorItem>()
+                .FirstOrDefault(item => string.Equals(item.Id, current.Id, StringComparison.OrdinalIgnoreCase));
+            _petLibraryText.Text = $"{current.DisplayName}\n{current.Description}";
+            _deletePetButton.IsEnabled = !current.IsBuiltIn;
+            _exportPetButton.IsEnabled = true;
+            _petPreview.Source = LoadPetPreview(current.SpritesheetPath);
+        }
+        finally
+        {
+            _isRefreshingPetLibraryUi = false;
+        }
+    }
+
+    private Task ImportPetAsync()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Import Vibestick Pet",
+            Filter = "Vibestick pets and atlases|*.vibestick-pet.zip;*.zip;*.png;*.webp|All files|*.*",
+            Multiselect = false
+        };
+        if (dialog.ShowDialog(this) == true)
+        {
+            ImportPetFile(dialog.FileName, replace: false, metadata: null);
+        }
+        return Task.CompletedTask;
+    }
+
+    private Task ExportCurrentPetAsync()
+    {
+        var current = _services.PetLibrary.GetCurrentPet();
+        var dialog = new SaveFileDialog
+        {
+            Title = "Export Vibestick Pet",
+            FileName = $"{current.Id}.vibestick-pet.zip",
+            Filter = "Vibestick pet package|*.vibestick-pet.zip|Zip archive|*.zip"
+        };
+        if (dialog.ShowDialog(this) == true)
+        {
+            try
+            {
+                _services.PetLibrary.ExportPet(current.Id, dialog.FileName);
+                MessageBox.Show(this, $"Exported {current.DisplayName}.", "Vibestick", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (PetLibraryException exception)
+            {
+                MessageBox.Show(this, exception.Message, "Vibestick", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+        return Task.CompletedTask;
+    }
+
+    private Task DeleteSelectedPetAsync()
+    {
+        var current = _services.PetLibrary.GetCurrentPet();
+        if (current.IsBuiltIn)
+        {
+            MessageBox.Show(this, "The built-in pet cannot be deleted.", "Vibestick", MessageBoxButton.OK, MessageBoxImage.Information);
+            return Task.CompletedTask;
+        }
+
+        var answer = MessageBox.Show(
+            this,
+            $"Delete {current.DisplayName}? This cannot be undone.",
+            "Vibestick",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            _services.PetLibrary.DeleteCustomPet(current.Id);
+            RefreshPetLibraryUi();
+            _petLibraryChanged();
+        }
+        catch (PetLibraryException exception)
+        {
+            MessageBox.Show(this, exception.Message, "Vibestick", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        return Task.CompletedTask;
+    }
+
+    private void ImportPetFile(string path, bool replace, PetImportMetadata? metadata)
+    {
+        try
+        {
+            var extension = Path.GetExtension(path);
+            PetDefinition imported;
+            if (extension.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                extension.Equals(".webp", StringComparison.OrdinalIgnoreCase))
+            {
+                metadata ??= PetMetadataDialog.Prompt(this, Path.GetFileNameWithoutExtension(path));
+                if (metadata is null)
+                {
+                    return;
+                }
+                imported = _services.PetLibrary.ImportRawAtlas(path, metadata, replace);
+            }
+            else
+            {
+                imported = _services.PetLibrary.ImportPackage(path, replace);
+            }
+
+            RefreshPetLibraryUi();
+            _petLibraryChanged();
+            MessageBox.Show(this, $"Imported and switched to {imported.DisplayName}.", "Vibestick", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (PetLibraryDuplicateException duplicate)
+        {
+            var answer = MessageBox.Show(
+                this,
+                $"Pet '{duplicate.PetId}' already exists. Replace it?",
+                "Vibestick",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (answer == MessageBoxResult.Yes)
+            {
+                ImportPetFile(path, replace: true, metadata);
+            }
+        }
+        catch (PetLibraryException exception)
+        {
+            MessageBox.Show(this, exception.Message, "Vibestick", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private static BitmapSource? LoadPetPreview(string spritesheetPath)
+    {
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.UriSource = new Uri(spritesheetPath, UriKind.Absolute);
+            image.EndInit();
+            image.Freeze();
+            return new CroppedBitmap(image, new Int32Rect(0, 0, 192, 208));
+        }
+        catch (Exception exception) when (exception is IOException or NotSupportedException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private UIElement BuildHyperWatchPanel()
@@ -563,7 +947,10 @@ public sealed class MainWindow : Window
                 CaptureButtonLayout(_onButton),
                 CaptureButtonLayout(_hyperButton),
                 CaptureButtonLayout(_stopHyperButton),
-                CaptureButtonLayout(_revertButton)
+                CaptureButtonLayout(_revertButton),
+                CaptureButtonLayout(_importPetButton),
+                CaptureButtonLayout(_exportPetButton),
+                CaptureButtonLayout(_deletePetButton)
             });
 
         var directory = Path.GetDirectoryName(_panelLayoutSnapshotPath);
@@ -998,4 +1385,108 @@ public sealed class MainWindow : Window
         double Right,
         double Bottom,
         bool FitsWithinWindow);
+
+    private sealed record PetSelectorItem(string Id, string Label);
+}
+
+internal sealed class PetMetadataDialog : Window
+{
+    private readonly TextBox _nameBox = new();
+    private readonly TextBox _descriptionBox = new();
+    private PetImportMetadata? _metadata;
+
+    private PetMetadataDialog(string suggestedName)
+    {
+        Title = "Import Pet Atlas";
+        Width = 380;
+        Height = 220;
+        MinWidth = 340;
+        MinHeight = 200;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        ResizeMode = ResizeMode.NoResize;
+        Background = MainWindowBrush("#f7f8fb");
+
+        _nameBox.Text = suggestedName;
+        _descriptionBox.Text = "Imported Vibestick pet.";
+
+        var root = new Grid { Margin = new Thickness(18) };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        AddLabeledTextBox(root, 0, "Pet name", _nameBox);
+        AddLabeledTextBox(root, 2, "Description", _descriptionBox);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+        };
+        var cancel = new Button { Content = "Cancel", Width = 82, Height = 32, Margin = new Thickness(0, 0, 8, 0) };
+        cancel.Click += (_, _) =>
+        {
+            DialogResult = false;
+            Close();
+        };
+        var import = new Button
+        {
+            Content = "Import",
+            Width = 82,
+            Height = 32,
+            FontWeight = FontWeights.SemiBold
+        };
+        import.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_nameBox.Text))
+            {
+                MessageBox.Show(this, "Pet name is required.", "Vibestick", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            _metadata = new PetImportMetadata(_nameBox.Text.Trim(), _descriptionBox.Text.Trim());
+            DialogResult = true;
+            Close();
+        };
+        buttons.Children.Add(cancel);
+        buttons.Children.Add(import);
+        Grid.SetRow(buttons, 4);
+        root.Children.Add(buttons);
+
+        Content = root;
+    }
+
+    public static PetImportMetadata? Prompt(Window? owner, string suggestedName)
+    {
+        var dialog = new PetMetadataDialog(string.IsNullOrWhiteSpace(suggestedName) ? "Imported Pet" : suggestedName)
+        {
+            Owner = owner
+        };
+        return dialog.ShowDialog() == true ? dialog._metadata : null;
+    }
+
+    private static void AddLabeledTextBox(Grid root, int row, string label, TextBox box)
+    {
+        var labelBlock = new TextBlock
+        {
+            Text = label,
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = MainWindowBrush("#29324a"),
+            Margin = new Thickness(0, 0, 0, 5)
+        };
+        Grid.SetRow(labelBlock, row);
+        root.Children.Add(labelBlock);
+
+        box.Height = 32;
+        box.Margin = new Thickness(0, 0, 0, 12);
+        Grid.SetRow(box, row + 1);
+        root.Children.Add(box);
+    }
+
+    private static SolidColorBrush MainWindowBrush(string color)
+    {
+        return new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+    }
 }

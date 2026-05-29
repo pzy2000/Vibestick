@@ -12,6 +12,7 @@ public sealed record GuiServices(
     ICoderStatusSource CoderStatusSource,
     CodexSessionStatusBridge? CodexStatusBridge,
     PetStateResolver PetStateResolver,
+    PetLibrary PetLibrary,
     string CoderStatusDirectory);
 
 public sealed class GuiRuntimeState
@@ -43,6 +44,11 @@ public static class GuiServiceFactory
             ? new CodexSessionStatusBridge(resolvedCoderStatusDirectory, codexSessionsRoot)
             : null;
         var petStateResolver = new PetStateResolver(options);
+        var petLibrary = new PetLibrary(
+            PetLibrary.GetDefaultRootDirectory(),
+            PetLibrary.GetDefaultSelectionPath(),
+            Path.Combine(AppContext.BaseDirectory, "Assets", "PetSprites", "golden-shaded-cat-spritesheet.cleaned.png"),
+            new WpfPetAtlasCodec());
 
         return new GuiServices(
             engine,
@@ -54,6 +60,7 @@ public static class GuiServiceFactory
             coderStatusSource,
             codexStatusBridge,
             petStateResolver,
+            petLibrary,
             resolvedCoderStatusDirectory);
     }
 }

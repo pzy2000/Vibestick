@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Text.Json.Nodes;
 using Vibestick.Core;
 
@@ -40,6 +41,11 @@ internal static class Program
             ("Composite coder source prefers adapter status over process fallback", TestCompositeCoderSourceAsync),
             ("Composite coder source preserves same-agent sessions", TestCompositeCoderSourcePreservesSessionsAsync),
             ("Process coder source treats idle Codex as sleeping", TestProcessCoderSourceCodexSleepingAsync),
+            ("Pet library imports raw atlas and selects it", TestPetLibraryRawAtlasImportAsync),
+            ("Pet library exports package contents", TestPetLibraryExportAsync),
+            ("Pet library rejects unsafe package paths", TestPetLibraryRejectsUnsafeZipAsync),
+            ("Pet library falls back to built-in selection", TestPetLibrarySelectionFallbackAsync),
+            ("Pet library rejects invalid atlas size", TestPetLibraryRejectsInvalidAtlasAsync),
             ("CLI coder emit, pet status, and clear smoke", TestCliCoderStatusSmokeAsync),
             ("GUI pet smoke exits cleanly", TestGuiPetSmokeAsync),
             ("GUI control panel shows all default actions", TestGuiPanelActionsVisibleAsync),
@@ -772,6 +778,126 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestPetLibraryRawAtlasImportAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-pets-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var library = CreateTestPetLibrary(directory, repoRoot);
+            var imported = library.ImportRawAtlas(
+                GetBundledWindowsPetAtlas(repoRoot),
+                new PetImportMetadata("Test Cat", "Imported for tests."));
+
+            AssertEqual("test-cat", imported.Id);
+            AssertEqual(false, imported.IsBuiltIn);
+            AssertTrue(File.Exists(Path.Combine(directory, "pets", "test-cat", "pet.json")));
+            AssertTrue(File.Exists(Path.Combine(directory, "pets", "test-cat", "spritesheet.png")));
+            AssertEqual("test-cat", library.GetCurrentPet().Id);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetLibraryExportAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-pets-export-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var library = CreateTestPetLibrary(directory, repoRoot);
+            library.ImportRawAtlas(GetBundledWindowsPetAtlas(repoRoot), new PetImportMetadata("Export Cat", "Export test pet."));
+            var exportPath = Path.Combine(directory, "export-cat.vibestick-pet.zip");
+
+            library.ExportPet("export-cat", exportPath);
+
+            using var archive = ZipFile.OpenRead(exportPath);
+            AssertTrue(archive.GetEntry("pet.json") is not null);
+            AssertTrue(archive.GetEntry("spritesheet.png") is not null);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetLibraryRejectsUnsafeZipAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-pets-unsafe-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var library = CreateTestPetLibrary(directory, repoRoot);
+            var zipPath = Path.Combine(directory, "unsafe.zip");
+            using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+            {
+                archive.CreateEntry("../pet.json");
+            }
+
+            AssertThrows<PetLibraryException>(() => library.ImportPackage(zipPath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetLibrarySelectionFallbackAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-pets-fallback-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var library = CreateTestPetLibrary(directory, repoRoot);
+            File.WriteAllText(Path.Combine(directory, "pet-selection.json"), """{"currentPetId":"missing"}""");
+
+            var current = library.GetCurrentPet();
+
+            AssertEqual(PetLibrary.BuiltInPetId, current.Id);
+            AssertEqual(true, current.IsBuiltIn);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPetLibraryRejectsInvalidAtlasAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-pets-invalid-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var library = CreateTestPetLibrary(directory, repoRoot);
+            var invalid = Path.Combine(directory, "invalid.png");
+            WritePngHeaderOnly(invalid, width: 128, height: 128, colorType: 6);
+
+            AssertThrows<PetLibraryException>(() =>
+                library.ImportRawAtlas(invalid, new PetImportMetadata("Tiny Cat", "Too small.")));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static async Task TestCliCoderStatusSmokeAsync()
     {
         var repoRoot = FindRepoRoot();
@@ -889,7 +1015,7 @@ internal static class Program
                 throw new InvalidOperationException("Expected control panel layout JSON.");
             var buttons = layout["Buttons"]?.AsArray() ??
                 throw new InvalidOperationException("Expected control panel button layout entries.");
-            AssertEqual(6, buttons.Count);
+            AssertEqual(9, buttons.Count);
 
             foreach (var action in new[]
             {
@@ -898,7 +1024,10 @@ internal static class Program
                 "Mode ON",
                 "Mode HYPER",
                 "Stop HYPER Guard",
-                "OFF / Revert"
+                "OFF / Revert",
+                "Import Pet",
+                "Export Current",
+                "Delete Custom Pet"
             })
             {
                 AssertPanelActionVisible(buttons, action);
@@ -1367,6 +1496,45 @@ internal static class Program
             ".dotnet",
             "dotnet.exe");
         return File.Exists(localDotnet) ? localDotnet : "dotnet";
+    }
+
+    private static PetLibrary CreateTestPetLibrary(string directory, string repoRoot)
+    {
+        return new PetLibrary(
+            Path.Combine(directory, "pets"),
+            Path.Combine(directory, "pet-selection.json"),
+            GetBundledWindowsPetAtlas(repoRoot),
+            new PngPetAtlasCodec());
+    }
+
+    private static string GetBundledWindowsPetAtlas(string repoRoot)
+    {
+        return Path.Combine(repoRoot, "src", "Vibestick.Gui", "Assets", "PetSprites", "golden-shaded-cat-spritesheet.cleaned.png");
+    }
+
+    private static void WritePngHeaderOnly(string path, int width, int height, byte colorType)
+    {
+        var bytes = new byte[33];
+        var signature = new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
+        signature.CopyTo(bytes, 0);
+        WriteBigEndian(bytes, 8, 13);
+        bytes[12] = (byte)'I';
+        bytes[13] = (byte)'H';
+        bytes[14] = (byte)'D';
+        bytes[15] = (byte)'R';
+        WriteBigEndian(bytes, 16, width);
+        WriteBigEndian(bytes, 20, height);
+        bytes[24] = 8;
+        bytes[25] = colorType;
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void WriteBigEndian(byte[] bytes, int offset, int value)
+    {
+        bytes[offset] = (byte)((value >> 24) & 0xff);
+        bytes[offset + 1] = (byte)((value >> 16) & 0xff);
+        bytes[offset + 2] = (byte)((value >> 8) & 0xff);
+        bytes[offset + 3] = (byte)(value & 0xff);
     }
 
     private static Task<CommandResult> RunDotnetAsync(string workingDirectory, string arguments)
@@ -1948,6 +2116,21 @@ internal static class Program
         try
         {
             await action().ConfigureAwait(false);
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Expected exception {typeof(TException).Name}.");
+    }
+
+    private static void AssertThrows<TException>(Action action)
+        where TException : Exception
+    {
+        try
+        {
+            action();
         }
         catch (TException)
         {
