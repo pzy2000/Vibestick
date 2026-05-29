@@ -434,6 +434,15 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(statuses[0].taskSummary, "Port Mac")
     }
 
+    func testProcessCommandRunnerDrainsLargeStdoutBeforeWaiting() throws {
+        let runner = ProcessCommandRunner(timeoutSeconds: 3)
+
+        let result = try runner.runChecked("/bin/sh", ["-c", "yes x | head -n 200000"])
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertGreaterThan(result.standardOutput.count, 200_000)
+    }
+
     func testCoderStatusIdentityUsesSessionWhenPresent() {
         XCTAssertEqual(
             coderStatus(agent: "codex", sessionId: "session-a").identity,
@@ -643,6 +652,42 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(
             URL(fileURLWithPath: try XCTUnwrap(statuses[0].sourcePath)).standardizedFileURL.path,
             sessionPath.standardizedFileURL.path)
+    }
+
+    func testCodexSessionStatusBridgeRetainsPartialLineUntilCompleted() throws {
+        let statusDirectory = temporaryDirectory()
+        let sessionsRoot = temporaryDirectory().appendingPathComponent("sessions", isDirectory: true)
+        let sessionDay = sessionsRoot
+            .appendingPathComponent("2026", isDirectory: true)
+            .appendingPathComponent("05", isDirectory: true)
+            .appendingPathComponent("19", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDay, withIntermediateDirectories: true)
+        let now = Date()
+        let timestamp = isoTimestamp(now)
+        let sessionPath = sessionDay.appendingPathComponent("rollout-2026-05-19T10-00-00-partial.jsonl")
+        let prefix = """
+        {"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/repo"}}
+        {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"func
+        """
+        try prefix.write(to: sessionPath, atomically: true, encoding: .utf8)
+        let bridge = CodexSessionStatusBridge(statusDirectory: statusDirectory, sessionsRoot: sessionsRoot)
+
+        bridge.refresh(now: now)
+
+        XCTAssertEqual(JsonFileCoderStatusSource(directory: statusDirectory).getStatuses(now: now), [])
+
+        let suffix = "tion_call\",\"name\":\"shell_command\"}}\n"
+        let handle = try FileHandle(forWritingTo: sessionPath)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(suffix.utf8))
+        try handle.close()
+
+        bridge.refresh(now: now)
+
+        let statuses = JsonFileCoderStatusSource(directory: statusDirectory).getStatuses(now: now)
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0].phase, .toolCalling)
+        XCTAssertEqual(statuses[0].message, "Using shell_command")
     }
 
     func testCodexSessionStatusBridgePreservesMultipleActiveSessions() throws {

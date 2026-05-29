@@ -763,12 +763,12 @@ public final class CodexSessionStatusBridge: @unchecked Sendable {
         }
 
         guard session.fileSize > session.position,
-              let contents = readNewContents(from: session.url, offset: session.position)
+              let (contents, newPosition) = readNewCompleteContents(from: session.url, offset: session.position)
         else {
             return false
         }
 
-        session.position = session.fileSize
+        session.position = newPosition
 
         var latestUpdate: CodexSessionStatusUpdate?
         var latestTimestamp = now
@@ -825,7 +825,7 @@ public final class CodexSessionStatusBridge: @unchecked Sendable {
         }
     }
 
-    private func readNewContents(from url: URL, offset: UInt64) -> String? {
+    private func readNewCompleteContents(from url: URL, offset: UInt64) -> (String, UInt64)? {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             return nil
         }
@@ -838,7 +838,18 @@ public final class CodexSessionStatusBridge: @unchecked Sendable {
             guard let data = try handle.readToEnd() else {
                 return nil
             }
-            return String(data: data, encoding: .utf8)
+
+            guard let newlineIndex = data.lastIndex(of: 0x0A) else {
+                return nil
+            }
+
+            let completeEnd = data.index(after: newlineIndex)
+            let completeData = data[..<completeEnd]
+            guard let contents = String(data: completeData, encoding: .utf8) else {
+                return nil
+            }
+
+            return (contents, offset + UInt64(completeData.count))
         } catch {
             return nil
         }

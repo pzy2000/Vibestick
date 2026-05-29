@@ -9,7 +9,8 @@ let codexSessionsDirectory = option("--codex-sessions-dir").map { URL(fileURLWit
 
 let options = VibestickOptions()
 let runner = ProcessCommandRunner()
-let helper = SubprocessHelperClient(runner: runner)
+let statusRunner = ProcessCommandRunner(timeoutSeconds: 3)
+let helper = SubprocessHelperClient(runner: runner, statusRunner: statusRunner)
 let battery = MacBatteryMonitor(runner: runner)
 let processInspector = MacProcessInspector(runner: runner)
 let assertionManager = MacSleepAssertionManager(runner: runner)

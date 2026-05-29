@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Text;
 
 namespace Vibestick.Core;
 
@@ -662,8 +663,13 @@ public sealed class CodexSessionStatusBridge : IDisposable
             return;
         }
 
-        var lines = ReadNewLines(session.Path, session.Position);
-        session.Position = new FileInfo(session.Path).Length;
+        var (lines, newPosition) = ReadNewCompleteLines(session.Path, session.Position);
+        if (lines.Count == 0)
+        {
+            return;
+        }
+
+        session.Position = newPosition;
 
         CodexSessionStatusUpdate? latestUpdate = null;
         DateTimeOffset latestTimestamp = now;
@@ -744,18 +750,28 @@ public sealed class CodexSessionStatusBridge : IDisposable
         return "Codex task";
     }
 
-    private static IReadOnlyList<string> ReadNewLines(string path, long position)
+    private static (IReadOnlyList<string> Lines, long NewPosition) ReadNewCompleteLines(string path, long position)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         stream.Seek(position, SeekOrigin.Begin);
-        using var reader = new StreamReader(stream);
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        var data = buffer.ToArray();
+        var lastNewline = Array.LastIndexOf(data, (byte)'\n');
+        if (lastNewline < 0)
+        {
+            return (Array.Empty<string>(), position);
+        }
+
+        var completeLength = lastNewline + 1;
+        using var reader = new StringReader(Encoding.UTF8.GetString(data, 0, completeLength));
         var lines = new List<string>();
         while (reader.ReadLine() is { } line)
         {
             lines.Add(line);
         }
 
-        return lines;
+        return (lines, position + completeLength);
     }
 
     private sealed class TrackedCodexSession

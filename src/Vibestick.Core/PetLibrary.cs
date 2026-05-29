@@ -34,7 +34,7 @@ public interface IPetAtlasCodec
     void NormalizeToPng(string sourcePath, string targetPath);
 }
 
-public sealed class PetLibraryException : Exception
+public class PetLibraryException : Exception
 {
     public PetLibraryException(string message)
         : base(message)

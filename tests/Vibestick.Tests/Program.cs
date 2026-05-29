@@ -28,6 +28,7 @@ internal static class Program
             ("Codex task summary extraction ignores environment context", TestCodexTaskSummaryExtractionAsync),
             ("Codex task detail extraction keeps readable progress", TestCodexTaskDetailExtractionAsync),
             ("Codex session bridge tails newest rollout", TestCodexSessionStatusBridgeAsync),
+            ("Codex session bridge retains partial rollout lines", TestCodexSessionBridgePartialLineAsync),
             ("Codex session bridge tracks multiple active rollouts", TestCodexSessionBridgeMultiSessionAsync),
             ("Pet resolver prioritizes urgent coder phases", TestPetResolverPhasePriorityAsync),
             ("Pet resolver maps tool calling mood", TestPetResolverToolCallingAsync),
@@ -64,6 +65,10 @@ internal static class Program
             {
                 await test.Run().ConfigureAwait(false);
                 Console.WriteLine($"PASS {test.Name}");
+            }
+            catch (SkipTestException exception)
+            {
+                Console.WriteLine($"SKIP {test.Name}: {exception.Message}");
             }
             catch (Exception exception)
             {
@@ -506,6 +511,45 @@ internal static class Program
         Directory.Delete(directory, recursive: true);
     }
 
+    private static async Task TestCodexSessionBridgePartialLineAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-codex-partial-{Guid.NewGuid():N}");
+        var statusDirectory = Path.Combine(directory, "status");
+        var sessionsRoot = Path.Combine(directory, "sessions");
+        var sessionDay = Path.Combine(sessionsRoot, "2026", "05", "18");
+        Directory.CreateDirectory(sessionDay);
+
+        try
+        {
+            using var bridge = new CodexSessionStatusBridge(statusDirectory, sessionsRoot);
+            bridge.Start();
+
+            var session = Path.Combine(sessionDay, "rollout-2026-05-18T10-00-00-partial.jsonl");
+            await File.WriteAllTextAsync(
+                    session,
+                    """
+                    {"type":"session_meta","payload":{"id":"session-a","cwd":"C:\\repo"}}
+                    {"type":"response_item","payload":{"type":"func
+                    """)
+                .ConfigureAwait(false);
+            await Task.Delay(500).ConfigureAwait(false);
+            AssertFalse(Directory.Exists(statusDirectory) && Directory.EnumerateFiles(statusDirectory, "*.json").Any());
+
+            await File.AppendAllTextAsync(
+                    session,
+                    "tion_call\",\"name\":\"shell_command\"}}" + Environment.NewLine)
+                .ConfigureAwait(false);
+
+            var status = await WaitForCoderStatusAsync(statusDirectory, CoderAgentPhase.ToolCalling, TimeSpan.FromSeconds(5))
+                .ConfigureAwait(false);
+            AssertEqual("Using shell_command", status.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static async Task TestCodexSessionBridgeMultiSessionAsync()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"vibestick-codex-multi-{Guid.NewGuid():N}");
@@ -901,27 +945,28 @@ internal static class Program
     private static async Task TestCliCoderStatusSmokeAsync()
     {
         var repoRoot = FindRepoRoot();
+        var cliProject = Path.Combine("src", "Vibestick.Cli");
         var directory = Path.Combine(Path.GetTempPath(), $"vibestick-cli-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
 
         var emit = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase reasoning --message \"thinking\" --ttl 60 --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- coder emit --agent codex --phase reasoning --message \"thinking\" --ttl 60 --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, emit.ExitCode);
 
         var status = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- pet status --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- pet status --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, status.ExitCode);
         var json = JsonNode.Parse(status.StandardOutput) ?? throw new InvalidOperationException("Expected pet status JSON.");
-        AssertEqual("reasoning", json["pet"]?["mood"]?.GetValue<string>());
+        AssertEqual("reasoning", json["pet"]?["primaryCoder"]?["phase"]?.GetValue<string>());
         AssertNotNull(json["battery"]);
 
         var toolAlias = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase tool-calling --message \"tool\" --ttl 60 --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- coder emit --agent codex --phase tool-calling --message \"tool\" --ttl 60 --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, toolAlias.ExitCode);
         var toolAliasJson = JsonNode.Parse(toolAlias.StandardOutput) ?? throw new InvalidOperationException("Expected tool alias JSON.");
@@ -929,15 +974,15 @@ internal static class Program
 
         var toolStatus = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- pet status --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- pet status --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, toolStatus.ExitCode);
         var toolJson = JsonNode.Parse(toolStatus.StandardOutput) ?? throw new InvalidOperationException("Expected tool pet status JSON.");
-        AssertEqual("tool_calling", toolJson["pet"]?["mood"]?.GetValue<string>());
+        AssertEqual("tool_calling", toolJson["pet"]?["primaryCoder"]?["phase"]?.GetValue<string>());
 
         var compactToolAlias = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase toolcalling --message \"tool compact\" --ttl 60 --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- coder emit --agent codex --phase toolcalling --message \"tool compact\" --ttl 60 --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, compactToolAlias.ExitCode);
         var compactToolJson = JsonNode.Parse(compactToolAlias.StandardOutput) ?? throw new InvalidOperationException("Expected compact tool alias JSON.");
@@ -945,7 +990,7 @@ internal static class Program
 
         var sessionEmit = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- coder emit --agent codex --phase reasoning --message \"session\" --session-id cli-session --summary \"CLI session task\" --ttl 60 --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- coder emit --agent codex --phase reasoning --message \"session\" --session-id cli-session --summary \"CLI session task\" --ttl 60 --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, sessionEmit.ExitCode);
         var sessionJson = JsonNode.Parse(sessionEmit.StandardOutput) ?? throw new InvalidOperationException("Expected session emit JSON.");
@@ -954,7 +999,7 @@ internal static class Program
 
         var clear = await RunDotnetAsync(
             repoRoot,
-            $"run --project src\\Vibestick.Cli --configuration Release -- coder clear --agent codex --status-dir \"{directory}\" --json")
+            $"run --project \"{cliProject}\" --configuration Release -- coder clear --agent codex --status-dir \"{directory}\" --json")
             .ConfigureAwait(false);
         AssertEqual(0, clear.ExitCode);
         var clearJson = JsonNode.Parse(clear.StandardOutput) ?? throw new InvalidOperationException("Expected clear JSON.");
@@ -1586,6 +1631,12 @@ internal static class Program
 
     private static async Task<string> PublishGuiForSmokeAsync(string repoRoot, string publishDirectory)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new SkipTestException("Vibestick.Gui uses Microsoft.NET.Sdk.WindowsDesktop, which can only be built on Windows.");
+        }
+
+        var guiProject = Path.Combine("src", "Vibestick.Gui");
         var appDirectory = Path.Combine(publishDirectory, "app");
         var binDirectory = Path.Combine(publishDirectory, "bin");
         var objDirectory = Path.Combine(publishDirectory, "obj");
@@ -1593,7 +1644,7 @@ internal static class Program
         var objPath = objDirectory.Replace('\\', '/') + "/";
         var result = await RunDotnetAsync(
                 repoRoot,
-                $"publish src\\Vibestick.Gui --configuration Release --no-restore --no-dependencies -p:UseAppHost=false -p:OutputPath=\"{binPath}\" -p:IntermediateOutputPath=\"{objPath}\" --output \"{appDirectory}\"",
+                $"publish \"{guiProject}\" --configuration Release --no-restore --no-dependencies -p:UseAppHost=false -p:OutputPath=\"{binPath}\" -p:IntermediateOutputPath=\"{objPath}\" --output \"{appDirectory}\"",
                 TimeSpan.FromSeconds(60))
             .ConfigureAwait(false);
         AssertEqual(0, result.ExitCode);
@@ -2310,6 +2361,14 @@ internal static class Program
         }
 
         public IReadOnlyList<CoderAgentStatus> GetStatuses(DateTimeOffset now) => _statuses;
+    }
+
+    private sealed class SkipTestException : Exception
+    {
+        public SkipTestException(string message)
+            : base(message)
+        {
+        }
     }
 
     private static class NativeMethods
