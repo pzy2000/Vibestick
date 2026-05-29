@@ -3,6 +3,35 @@ import XCTest
 
 @MainActor
 final class MacPetSpriteAnimatorTests: XCTestCase {
+    func testInitialIdleUsesSleepyNapClip() {
+        let animator = MacPetSpriteAnimator()
+
+        let frame = animator.frame
+        XCTAssertEqual(frame.clipName, "sleepy_nap")
+        XCTAssertEqual(frame.pose, "sleepy")
+        XCTAssertEqual(frame.row, 5)
+    }
+
+    func testIdleHoveringKeepsSleepyNapClip() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setHovering(true)
+
+        let frame = animator.frame
+        XCTAssertEqual(frame.clipName, "sleepy_nap")
+        XCTAssertEqual(frame.pose, "sleepy")
+    }
+
+    func testSleepingMoodUsesSleepyNapClip() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setMood("sleeping")
+
+        let frame = animator.frame
+        XCTAssertEqual(frame.clipName, "sleepy_nap")
+        XCTAssertEqual(frame.pose, "sleepy")
+    }
+
     func testCrawlDirectionOverridesHoveringAttentionClip() {
         let animator = MacPetSpriteAnimator()
 

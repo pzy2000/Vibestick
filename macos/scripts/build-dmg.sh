@@ -91,15 +91,16 @@ osascript <<APPLESCRIPT
 tell application "Finder"
   set dmgFolder to POSIX file "$mount_dir" as alias
   open dmgFolder
-  set current view of container window of dmgFolder to icon view
+  set dmgWindow to container window of dmgFolder
+  set current view of dmgWindow to icon view
   try
-    set toolbar visible of container window of dmgFolder to false
+    set toolbar visible of dmgWindow to false
   end try
   try
-    set statusbar visible of container window of dmgFolder to false
+    set statusbar visible of dmgWindow to false
   end try
-  set bounds of container window of dmgFolder to {120, 120, 760, 540}
-  set viewOptions to the icon view options of container window of dmgFolder
+  set bounds of dmgWindow to {120, 120, 760, 540}
+  set viewOptions to the icon view options of dmgWindow
   set arrangement of viewOptions to not arranged
   set icon size of viewOptions to 96
   set background picture of viewOptions to POSIX file "$mount_dir/Vibestick.app/Contents/Resources/Vibestick-dmg-background.png"
@@ -107,7 +108,6 @@ tell application "Finder"
   set position of item "Applications" of dmgFolder to {480, 210}
   update dmgFolder without registering applications
   delay 1
-  close container window of dmgFolder
 end tell
 APPLESCRIPT
 

@@ -41,7 +41,7 @@ final class MacPetSpriteAnimator {
     private var lastFrameAdvanceAt = Date()
 
     init() {
-        activeClip = Self.clips["seated_blink"]!
+        activeClip = Self.clips["sleepy_nap"]!
     }
 
     var frame: MacPetSpriteFrameSnapshot {
@@ -137,13 +137,13 @@ final class MacPetSpriteAnimator {
         if crawlDirection != nil {
             return Self.clips["patrol_crawl"]!
         }
-        if isHovering {
-            randomActionClip = nil
-            return Self.clips["attention_paw"]!
-        }
         if let fixedClip = fixedStateClip(for: mood) {
             randomActionClip = nil
             return fixedClip
+        }
+        if isHovering {
+            randomActionClip = nil
+            return Self.clips["attention_paw"]!
         }
         if let randomActionClip {
             return randomActionClip
@@ -176,9 +176,7 @@ final class MacPetSpriteAnimator {
     }
 
     private func chooseRandomAction() -> PetAnimationClip {
-        let activePool = ["curious_look", "attention_paw", "playful_stretch", "groom_think"]
-        let idlePool = ["curious_look", "attention_paw", "playful_stretch", "sleepy_nap", "happy_beg", "groom_think"]
-        let pool = ["running", "reasoning"].contains(mood) ? activePool : idlePool
+        let pool = ["curious_look", "attention_paw", "playful_stretch", "groom_think"]
         return Self.clips[pool.randomElement()!]!
     }
 
@@ -192,11 +190,13 @@ final class MacPetSpriteAnimator {
     }
 
     private func canUseRandomActions(_ mood: String) -> Bool {
-        ["idle", "offline", "running", "reasoning"].contains(mood)
+        ["running", "reasoning"].contains(mood)
     }
 
     private func fixedStateClip(for mood: String) -> PetAnimationClip? {
         switch mood {
+        case "idle", "sleeping":
+            Self.clips["sleepy_nap"]!
         case "waiting":
             Self.clips["waiting_peek"]!
         case "tool_calling":
@@ -209,8 +209,6 @@ final class MacPetSpriteAnimator {
             Self.clips["low_battery_curl"]!
         case "power":
             Self.clips["power_guard"]!
-        case "sleeping":
-            Self.clips["sleepy_nap"]!
         default:
             nil
         }
@@ -220,7 +218,7 @@ final class MacPetSpriteAnimator {
         switch mood {
         case "running", "reasoning":
             Self.clips["curious_look"]!
-        case "sleeping":
+        case "idle", "sleeping":
             Self.clips["sleepy_nap"]!
         default:
             Self.clips["seated_blink"]!
