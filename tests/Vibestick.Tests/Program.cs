@@ -2035,10 +2035,25 @@ internal static class Program
     {
         var button = buttons.FirstOrDefault(node => node?["Text"]?.GetValue<string>() == text) ??
             throw new InvalidOperationException($"Expected control panel action '{text}'.");
-        AssertEqual(true, button["IsVisible"]?.GetValue<bool>());
-        AssertEqual(true, button["FitsWithinWindow"]?.GetValue<bool>());
-        AssertTrue(button["Width"]?.GetValue<double>() >= 100);
-        AssertTrue(button["Height"]?.GetValue<double>() >= 30);
+        if (button["IsVisible"]?.GetValue<bool>() != true)
+        {
+            throw new InvalidOperationException($"Expected control panel action '{text}' to be visible: {button.ToJsonString()}");
+        }
+
+        if (button["FitsWithinWindow"]?.GetValue<bool>() != true)
+        {
+            throw new InvalidOperationException($"Expected control panel action '{text}' to fit within the window: {button.ToJsonString()}");
+        }
+
+        if (button["Width"]?.GetValue<double>() < 100)
+        {
+            throw new InvalidOperationException($"Expected control panel action '{text}' to be at least 100px wide: {button.ToJsonString()}");
+        }
+
+        if (button["Height"]?.GetValue<double>() < 30)
+        {
+            throw new InvalidOperationException($"Expected control panel action '{text}' to be at least 30px tall: {button.ToJsonString()}");
+        }
     }
 
     private static void AssertNearBottomRight(JsonNode snapshot)
