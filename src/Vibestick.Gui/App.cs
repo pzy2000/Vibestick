@@ -23,6 +23,9 @@ using MessageBox = System.Windows.MessageBox;
 using Panel = System.Windows.Controls.Panel;
 using ComboBox = System.Windows.Controls.ComboBox;
 using TextBox = System.Windows.Controls.TextBox;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using Orientation = System.Windows.Controls.Orientation;
+using SaveFileDialog = Microsoft.Win32.SaveFileDialog;
 
 namespace Vibestick.Gui;
 
@@ -417,7 +420,7 @@ public sealed class MainWindow : Window
 
         Title = "Vibestick";
         Width = 980;
-        Height = 720;
+        Height = 900;
         MinWidth = 760;
         MinHeight = 560;
         Background = Brush("#f7f8fb");
@@ -503,7 +506,7 @@ public sealed class MainWindow : Window
         {
             Margin = new Thickness(0, 18, 0, 0)
         };
-        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(650) });
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         Grid.SetRow(body, 3);
@@ -530,9 +533,14 @@ public sealed class MainWindow : Window
             CornerRadius = new CornerRadius(8),
             Child = controls
         };
-        var leftPanel = new StackPanel();
+        var leftPanel = new Grid();
+        leftPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+        leftPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+        leftPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         leftPanel.Children.Add(controlsPanel);
-        leftPanel.Children.Add(BuildPetLibraryPanel());
+        var petLibraryPanel = BuildPetLibraryPanel();
+        Grid.SetColumn(petLibraryPanel, 2);
+        leftPanel.Children.Add(petLibraryPanel);
         body.Children.Add(leftPanel);
 
         var outputGrid = new Grid();
@@ -615,8 +623,8 @@ public sealed class MainWindow : Window
 
         var actions = new UniformGrid
         {
-            Columns = 1,
-            Rows = 3
+            Columns = 2,
+            Rows = 2
         };
         AddActionButton(actions, _importPetButton, "Import Pet", ImportPetAsync);
         AddActionButton(actions, _exportPetButton, "Export Current", ExportCurrentPetAsync);
@@ -625,7 +633,6 @@ public sealed class MainWindow : Window
 
         return new Border
         {
-            Margin = new Thickness(0, 14, 0, 0),
             Padding = new Thickness(14),
             Background = Brushes.White,
             BorderBrush = Brush("#e1e5ee"),
@@ -935,6 +942,10 @@ public sealed class MainWindow : Window
             return;
         }
 
+        UpdateLayout();
+        await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+        await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+
         var snapshot = new PanelLayoutSnapshot(
             Width,
             Height,
@@ -967,9 +978,15 @@ public sealed class MainWindow : Window
 
     private ButtonLayoutSnapshot CaptureButtonLayout(Button button)
     {
-        var bounds = button.TransformToAncestor(this).TransformBounds(
-            new Rect(0, 0, button.ActualWidth, button.ActualHeight));
-        var clientBounds = new Rect(0, 0, ActualWidth, ActualHeight);
+        var contentRoot = Content as FrameworkElement;
+        var bounds = contentRoot is not null
+            ? button.TransformToAncestor(contentRoot).TransformBounds(
+                new Rect(0, 0, button.ActualWidth, button.ActualHeight))
+            : button.TransformToAncestor(this).TransformBounds(
+                new Rect(0, 0, button.ActualWidth, button.ActualHeight));
+        var clientBounds = contentRoot is not null
+            ? new Rect(0, 0, contentRoot.ActualWidth, contentRoot.ActualHeight)
+            : new Rect(0, 0, ActualWidth, ActualHeight);
         var fitsWithinWindow =
             button.IsVisible &&
             button.ActualWidth > 0 &&

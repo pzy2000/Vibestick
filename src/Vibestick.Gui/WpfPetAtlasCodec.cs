@@ -1,6 +1,11 @@
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Vibestick.Core;
+using Directory = System.IO.Directory;
+using File = System.IO.File;
+using FileFormatException = System.IO.FileFormatException;
+using IOException = System.IO.IOException;
+using Path = System.IO.Path;
 
 namespace Vibestick.Gui;
 
