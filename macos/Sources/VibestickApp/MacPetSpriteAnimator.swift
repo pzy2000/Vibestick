@@ -33,6 +33,7 @@ struct MacPetSpritePresentation {
     let frame: MacPetSpriteFrameSnapshot
     let contentsRect: CGRect
     let horizontalScale: CGFloat
+    let renderedMotionOffsetX: CGFloat
 }
 
 @MainActor
@@ -66,10 +67,13 @@ final class MacPetSpriteAnimator {
 
     var presentation: MacPetSpritePresentation {
         let frameRef = activeClip.frames[frameIndex % activeClip.frames.count]
+        let frame = snapshot(for: frameRef)
+        let horizontalScale: CGFloat = activeClip.flipsWithDirection && crawlDirection == .left ? -1 : 1
         return MacPetSpritePresentation(
-            frame: snapshot(for: frameRef),
+            frame: frame,
             contentsRect: contentsRect(for: frameRef),
-            horizontalScale: activeClip.flipsWithDirection && crawlDirection == .left ? -1 : 1)
+            horizontalScale: horizontalScale,
+            renderedMotionOffsetX: CGFloat(frame.motionOffsetX) * horizontalScale)
     }
 
     @discardableResult
@@ -405,7 +409,7 @@ final class MacPetSpriteLayerView: NSView {
 
         spriteLayer.bounds = CGRect(origin: .zero, size: bounds.size)
         spriteLayer.position = CGPoint(
-            x: bounds.midX + CGFloat(presentation.frame.motionOffsetX),
+            x: bounds.midX + presentation.renderedMotionOffsetX,
             y: bounds.midY - CGFloat(presentation.frame.motionOffsetY))
         spriteLayer.contentsRect = presentation.contentsRect
         spriteLayer.transform = CATransform3DMakeScale(presentation.horizontalScale, 1, 1)

@@ -45,6 +45,39 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         XCTAssertTrue(frame.flipsWithDirection)
     }
 
+    func testRightCrawlUsesUnmirroredPresentationOffset() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setCrawlDirection(.right)
+
+        let presentation = animator.presentation
+        XCTAssertEqual(presentation.horizontalScale, 1)
+        XCTAssertEqual(presentation.renderedMotionOffsetX, CGFloat(presentation.frame.motionOffsetX))
+    }
+
+    func testLeftCrawlMirrorsPresentationOffset() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setCrawlDirection(.left)
+
+        let presentation = animator.presentation
+        XCTAssertEqual(presentation.horizontalScale, -1)
+        XCTAssertEqual(presentation.renderedMotionOffsetX, -CGFloat(presentation.frame.motionOffsetX))
+    }
+
+    func testLeftAndRightCrawlRenderedOffsetsAreOppositeForSameFrame() {
+        let rightAnimator = MacPetSpriteAnimator()
+        let leftAnimator = MacPetSpriteAnimator()
+
+        rightAnimator.setCrawlDirection(.right)
+        leftAnimator.setCrawlDirection(.left)
+
+        XCTAssertEqual(rightAnimator.frame.frameIndex, leftAnimator.frame.frameIndex)
+        XCTAssertEqual(
+            leftAnimator.presentation.renderedMotionOffsetX,
+            -rightAnimator.presentation.renderedMotionOffsetX)
+    }
+
     func testCrawlDirectionStartsCrawlingWhenAlreadyHovering() {
         let animator = MacPetSpriteAnimator()
 
