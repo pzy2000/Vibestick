@@ -1433,6 +1433,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var lastTick: Date?
     private var nextWanderAt: Date?
     private var direction: MacPetCrawlDirection = .left
+    private var manualDragDirection: MacPetCrawlDirection?
     private var currentWalkSpeed = PetPanel.randomWalkSpeed()
     private var crawlAnimationSuppressed = false
     private var walkingEnabled = PetPanel.loadWalkingEnabled()
@@ -1494,8 +1495,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         hosting.onDragStart = { [weak self] in
             self?.beginManualDrag()
         }
-        hosting.onDragTo = { [weak self] origin in
-            self?.moveManually(to: origin)
+        hosting.onDragTo = { [weak self] origin, deltaX in
+            self?.moveManually(to: origin, dragDeltaX: deltaX)
         }
         hosting.onDragEnd = { [weak self] in
             self?.finishManualDrag()
@@ -1712,6 +1713,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         if presenceMode == .reduced {
             manualInteractionDuringReduced = true
         }
+        manualDragDirection = direction
         if walkingEnabled {
             walkingEnabled = false
             UserDefaults.standard.set(walkingEnabled, forKey: Self.walkingEnabledDefaultsKey)
@@ -1723,12 +1725,20 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         updateSpritePresentation(at: Date(), force: true)
     }
 
-    private func moveManually(to origin: NSPoint) {
+    private func moveManually(to origin: NSPoint, dragDeltaX: CGFloat) {
+        let nextDirection = MacPetCrawlDirection.direction(
+            forDragDeltaX: dragDeltaX,
+            current: manualDragDirection ?? direction)
+        manualDragDirection = nextDirection
+        direction = nextDirection
         setFrameOrigin(clampedOrigin(origin, preferRetainedScreen: false))
+        updateSpritePresentation(at: Date())
     }
 
     private func finishManualDrag() {
+        manualDragDirection = nil
         saveCurrentPosition()
+        updateSpritePresentation(at: Date(), force: true)
     }
 
     private func enterReducedPresence() {
@@ -2159,6 +2169,9 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func activeCrawlDirection(at now: Date) -> MacPetCrawlDirection? {
+        if let manualDragDirection {
+            return manualDragDirection
+        }
         guard walkingEnabled, presenceMode == .normal, !crawlAnimationSuppressed else {
             return nil
         }
@@ -2177,7 +2190,7 @@ private final class PetHostingView: NSHostingView<PetView> {
     var onCommandClick: (() -> Void)?
     var onScroll: ((CGFloat) -> Void)?
     var onDragStart: (() -> Void)?
-    var onDragTo: ((NSPoint) -> Void)?
+    var onDragTo: ((NSPoint, CGFloat) -> Void)?
     var onDragEnd: (() -> Void)?
 
     var petContextMenu: NSMenu? {
@@ -2242,6 +2255,7 @@ private final class PetHostingView: NSHostingView<PetView> {
 
         let startMouseLocation = NSEvent.mouseLocation
         let startWindowOrigin = window.frame.origin
+        var lastMouseLocation = startMouseLocation
         var isDragging = false
 
         while true {
@@ -2258,6 +2272,7 @@ private final class PetHostingView: NSHostingView<PetView> {
             let delta = NSPoint(
                 x: currentMouseLocation.x - startMouseLocation.x,
                 y: currentMouseLocation.y - startMouseLocation.y)
+            let dragDeltaX = currentMouseLocation.x - lastMouseLocation.x
             let distance = hypot(delta.x, delta.y)
 
             if nextEvent.type == .leftMouseDragged {
@@ -2270,8 +2285,10 @@ private final class PetHostingView: NSHostingView<PetView> {
                 if isDragging {
                     onDragTo?(NSPoint(
                         x: startWindowOrigin.x + delta.x,
-                        y: startWindowOrigin.y + delta.y))
+                        y: startWindowOrigin.y + delta.y),
+                        dragDeltaX)
                 }
+                lastMouseLocation = currentMouseLocation
                 continue
             }
 

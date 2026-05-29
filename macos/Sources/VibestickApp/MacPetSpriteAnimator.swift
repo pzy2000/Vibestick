@@ -4,6 +4,18 @@ import QuartzCore
 enum MacPetCrawlDirection: Equatable {
     case left
     case right
+
+    private static let dragDirectionThreshold: CGFloat = 1
+
+    static func direction(forDragDeltaX deltaX: CGFloat, current: MacPetCrawlDirection) -> MacPetCrawlDirection {
+        if deltaX > dragDirectionThreshold {
+            return .right
+        }
+        if deltaX < -dragDirectionThreshold {
+            return .left
+        }
+        return current
+    }
 }
 
 struct MacPetSpriteFrameSnapshot: Equatable {
@@ -137,13 +149,13 @@ final class MacPetSpriteAnimator {
         if crawlDirection != nil {
             return Self.clips["patrol_crawl"]!
         }
-        if let fixedClip = fixedStateClip(for: mood) {
-            randomActionClip = nil
-            return fixedClip
-        }
         if isHovering {
             randomActionClip = nil
             return Self.clips["attention_paw"]!
+        }
+        if let fixedClip = fixedStateClip(for: mood) {
+            randomActionClip = nil
+            return fixedClip
         }
         if let randomActionClip {
             return randomActionClip

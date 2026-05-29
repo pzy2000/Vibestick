@@ -12,14 +12,14 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         XCTAssertEqual(frame.row, 5)
     }
 
-    func testIdleHoveringKeepsSleepyNapClip() {
+    func testIdleHoveringUsesAttentionClip() {
         let animator = MacPetSpriteAnimator()
 
         animator.setHovering(true)
 
         let frame = animator.frame
-        XCTAssertEqual(frame.clipName, "sleepy_nap")
-        XCTAssertEqual(frame.pose, "sleepy")
+        XCTAssertEqual(frame.clipName, "attention_paw")
+        XCTAssertEqual(frame.pose, "attention")
     }
 
     func testSleepingMoodUsesSleepyNapClip() {
@@ -68,5 +68,30 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         XCTAssertEqual(frame.pose, "crawling")
         XCTAssertTrue([1, 2].contains(frame.row))
         XCTAssertTrue(frame.flipsWithDirection)
+    }
+
+    func testHoveringOverridesFixedMoodAndClearingHoverRestoresMoodClip() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setMood("tool_calling")
+        animator.setHovering(true)
+
+        XCTAssertEqual(animator.frame.clipName, "attention_paw")
+        XCTAssertEqual(animator.frame.pose, "attention")
+
+        animator.setHovering(false)
+
+        XCTAssertEqual(animator.frame.clipName, "tool_typing")
+        XCTAssertEqual(animator.frame.pose, "typing")
+    }
+
+    func testDragDirectionHelperUsesHorizontalDelta() {
+        XCTAssertEqual(MacPetCrawlDirection.direction(forDragDeltaX: 12, current: .left), .right)
+        XCTAssertEqual(MacPetCrawlDirection.direction(forDragDeltaX: -12, current: .right), .left)
+    }
+
+    func testDragDirectionHelperKeepsCurrentDirectionForSmallJitter() {
+        XCTAssertEqual(MacPetCrawlDirection.direction(forDragDeltaX: 0.5, current: .left), .left)
+        XCTAssertEqual(MacPetCrawlDirection.direction(forDragDeltaX: -0.5, current: .right), .right)
     }
 }
