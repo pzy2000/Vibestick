@@ -63,7 +63,6 @@ public sealed class VibestickOptions
     public IReadOnlyList<string> LongTaskProcessNames { get; init; } = new[]
     {
         "cargo",
-        "go",
         "pytest",
         "docker",
         "uv",

@@ -18,6 +18,7 @@ internal static class Program
             ("HYPER downgrades to ON below battery downgrade threshold", TestHyperDowngradesOnLowBatteryAsync),
             ("HYPER restores normal sleep below critical battery threshold", TestHyperRestoresOnCriticalBatteryAsync),
             ("Long task detector matches normalized process names", TestLongTaskDetectorAsync),
+            ("Default long task process names exclude Go toolchain", TestDefaultLongTaskProcessNamesExcludeGoToolchainAsync),
             ("Long task detector recognizes known CLI command lines", TestLongTaskCommandLineDetectorAsync),
             ("Device detector prefers Vibestick firmware over RP2 bootloader", TestDeviceDetectorPrefersFirmwareAsync),
             ("Device detector recognizes RP2 bootloader volume", TestDeviceDetectorBootloaderAsync),
@@ -193,6 +194,14 @@ internal static class Program
             options.LongTaskProcessNames);
 
         AssertSequence(new[] { "claude", "codex", "docker", "openclaw-cli", "opencode" }, matches);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestDefaultLongTaskProcessNamesExcludeGoToolchainAsync()
+    {
+        var options = new VibestickOptions();
+
+        AssertFalse(options.LongTaskProcessNames.Any(name => LongTaskDetector.NormalizeProcessName(name) == "go"));
         return Task.CompletedTask;
     }
 

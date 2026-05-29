@@ -847,6 +847,12 @@ final class VibestickMacCoreTests: XCTestCase {
         XCTAssertEqual(tasks, [])
     }
 
+    func testDefaultLongTaskProcessNamesExcludeGoToolchain() {
+        let options = VibestickOptions()
+
+        XCTAssertFalse(options.longTaskProcessNames.contains { MacProcessInspector.normalize($0) == "go" })
+    }
+
     func testDeviceDetectorLaunchesForFinalVibestickFirmware() {
         let detection = DeviceDetector.detect([
             DeviceSnapshot(instanceId: "USB\\VID_2E8A&PID_4002\\VS-RP2040-0002")

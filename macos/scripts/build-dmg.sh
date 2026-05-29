@@ -40,6 +40,9 @@ clear_bundle_xattrs() {
   local bundle="$1"
   if command -v xattr >/dev/null 2>&1; then
     xattr -cr "$bundle" || true
+    xattr -rd com.apple.FinderInfo "$bundle" 2>/dev/null || true
+    xattr -rd "com.apple.fileprovider.fpfs#P" "$bundle" 2>/dev/null || true
+    xattr -rd com.apple.ResourceFork "$bundle" 2>/dev/null || true
     find "$bundle" -exec sh -c '
       for path do
         xattr -d "com.apple.fileprovider.fpfs#P" "$path" 2>/dev/null || true
@@ -89,8 +92,12 @@ tell application "Finder"
   set dmgFolder to POSIX file "$mount_dir" as alias
   open dmgFolder
   set current view of container window of dmgFolder to icon view
-  set toolbar visible of container window of dmgFolder to false
-  set statusbar visible of container window of dmgFolder to false
+  try
+    set toolbar visible of container window of dmgFolder to false
+  end try
+  try
+    set statusbar visible of container window of dmgFolder to false
+  end try
   set bounds of container window of dmgFolder to {120, 120, 760, 540}
   set viewOptions to the icon view options of container window of dmgFolder
   set arrangement of viewOptions to not arranged
@@ -112,6 +119,7 @@ device=""
 
 hdiutil convert "$rw_dmg" -format UDZO -imagekey zlib-level=9 -o "$final_dmg" >/dev/null
 hdiutil verify "$final_dmg" >/dev/null
+clear_bundle_xattrs "$app"
 
 if [[ "$mode" == "release" ]]; then
   : "${DEVELOPER_ID_APPLICATION:?Set DEVELOPER_ID_APPLICATION for release DMG signing.}"

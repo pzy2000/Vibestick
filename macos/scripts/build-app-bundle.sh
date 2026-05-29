@@ -61,6 +61,9 @@ clear_app_xattrs() {
   if command -v xattr >/dev/null 2>&1; then
     for _ in 1 2 3; do
       xattr -cr "$bundle" || true
+      xattr -rd com.apple.FinderInfo "$bundle" 2>/dev/null || true
+      xattr -rd "com.apple.fileprovider.fpfs#P" "$bundle" 2>/dev/null || true
+      xattr -rd com.apple.ResourceFork "$bundle" 2>/dev/null || true
       find "$bundle" -exec sh -c '
         for path do
           xattr -d "com.apple.fileprovider.fpfs#P" "$path" 2>/dev/null || true
