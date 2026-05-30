@@ -566,7 +566,19 @@ public sealed class MainWindow : Window
         leftPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
         leftPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
         leftPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        leftPanel.Children.Add(controlsPanel);
+        var controlsColumn = new StackPanel();
+        controlsColumn.Children.Add(controlsPanel);
+        controlsColumn.Children.Add(new Border
+        {
+            Margin = new Thickness(0, 16, 0, 0),
+            Padding = new Thickness(14),
+            Background = Brushes.White,
+            BorderBrush = Brush("#e1e5ee"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Child = BuildPetActionFrequencyPanel()
+        });
+        leftPanel.Children.Add(controlsColumn);
         var petLibraryPanel = BuildPetLibraryPanel();
         Grid.SetColumn(petLibraryPanel, 2);
         leftPanel.Children.Add(petLibraryPanel);
@@ -659,7 +671,6 @@ public sealed class MainWindow : Window
         AddActionButton(actions, _exportPetButton, "Export Current", ExportCurrentPetAsync);
         AddActionButton(actions, _deletePetButton, "Delete Custom Pet", DeleteSelectedPetAsync);
         root.Children.Add(actions);
-        root.Children.Add(BuildPetActionFrequencyPanel());
 
         return new Border
         {
@@ -674,7 +685,7 @@ public sealed class MainWindow : Window
 
     private UIElement BuildPetActionFrequencyPanel()
     {
-        var root = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+        var root = new StackPanel();
         root.Children.Add(new TextBlock
         {
             Text = "Pet Action Frequency",

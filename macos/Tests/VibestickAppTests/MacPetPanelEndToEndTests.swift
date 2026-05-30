@@ -72,7 +72,7 @@ final class MacPetPanelEndToEndTests: XCTestCase {
     }
 
     func testResizingClampsFrameInsideVisibleScreen() throws {
-        guard let screen = NSScreen.main else {
+        guard !NSScreen.screens.isEmpty else {
             throw XCTSkip("No screen is available for pet panel end-to-end testing.")
         }
 
@@ -91,6 +91,9 @@ final class MacPetPanelEndToEndTests: XCTestCase {
 
         let panel = makePanel()
         defer { panel.close() }
+        guard let screen = panel.screen ?? NSScreen.main else {
+            throw XCTSkip("No screen is available for pet panel end-to-end testing.")
+        }
 
         panel.setFrameOrigin(NSPoint(
             x: screen.visibleFrame.maxX - panel.frame.width + 20,
