@@ -145,6 +145,47 @@ final class MacPetPanelEndToEndTests: XCTestCase {
         XCTAssertFalse(panel.isResizeHandleVisible)
     }
 
+    func testResizeHandleHitTestUsesRenderedPetSpriteBottomRight() {
+        let defaults = UserDefaults.standard
+        let snapshot = saveDefaults(
+            "VibestickPetCardDisplayMode",
+            "VibestickPetWindowScale")
+        defer { restore(snapshot, in: defaults) }
+
+        defaults.set("compact", forKey: "VibestickPetCardDisplayMode")
+        defaults.set(1.0, forKey: "VibestickPetWindowScale")
+
+        let panel = makePanel()
+        defer { panel.close() }
+        panel.orderFrontRegardless()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+
+        let handleFrame = panel.resizeHandleFrameForTesting()
+        let contentBounds = panel.contentView?.bounds ?? NSRect(origin: .zero, size: panel.frame.size)
+
+        XCTAssertLessThan(
+            handleFrame.maxX,
+            contentBounds.maxX - 40,
+            "Expected the resize handle to anchor to the rendered pet, not the transparent panel edge.")
+        XCTAssertGreaterThan(
+            handleFrame.minY,
+            contentBounds.minY + 70,
+            "Expected the resize handle to anchor to the rendered pet, not the transparent panel bottom.")
+        XCTAssertTrue(
+            panel.isResizeHandleHitForTesting(at: NSPoint(x: handleFrame.midX, y: handleFrame.midY)),
+            "Expected the rendered pet lower-right handle to enter resize mode.")
+        XCTAssertTrue(
+            panel.isResizeHandleHitForTesting(at: NSPoint(x: handleFrame.maxX + 2, y: handleFrame.minY - 2)),
+            "Expected handle padding to remain resizeable.")
+        XCTAssertFalse(
+            panel.isResizeHandleHitForTesting(at: NSPoint(x: handleFrame.minX - 44, y: handleFrame.midY)),
+            "Expected lower middle/left pet area to keep the existing move behavior.")
+        XCTAssertFalse(
+            panel.isResizeHandleHitForTesting(at: NSPoint(x: panel.frame.width / 2, y: panel.frame.height / 2)),
+            "Expected the panel body to keep the existing move behavior.")
+    }
+
     func testPanelLoadsAndAppliesActionFrequencySettings() {
         let defaults = UserDefaults.standard
         let snapshot = saveDefaults(

@@ -1317,7 +1317,7 @@ internal static class Program
                 """)
             .ConfigureAwait(false);
         await new CoderStatusWriter(directory)
-            .EmitAsync("codex", CoderAgentPhase.Idle, "idle", ttlSeconds: 60)
+            .EmitAsync("codex", CoderAgentPhase.Reasoning, "reasoning", ttlSeconds: 60)
             .ConfigureAwait(false);
 
         var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
@@ -1335,14 +1335,14 @@ internal static class Program
 
         try
         {
-            var initial = await WaitForPetSnapshotAnyAsync(directory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            var initial = await WaitForPetSnapshotAsync(directory, "reasoning", TimeSpan.FromSeconds(10)).ConfigureAwait(false);
             AssertSpriteCatalog(initial);
             AssertSpriteClip(initial, "seated_blink");
 
             var randomAction = await WaitForSpriteClipNotAsync(directory, "seated_blink", TimeSpan.FromSeconds(8)).ConfigureAwait(false);
             AssertSpriteCatalog(randomAction);
             AssertTrue(randomAction["sprite"]?["clipName"]?.GetValue<string>() is
-                "curious_look" or "attention_paw" or "playful_stretch" or "sleepy_nap" or "happy_beg" or "groom_think");
+                "curious_look" or "attention_paw" or "playful_stretch" or "groom_think");
 
             var returned = await WaitForSpriteClipAsync(directory, "seated_blink", TimeSpan.FromSeconds(8)).ConfigureAwait(false);
             AssertSpriteCatalog(returned);

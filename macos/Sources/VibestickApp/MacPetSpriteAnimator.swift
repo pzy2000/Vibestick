@@ -207,7 +207,7 @@ final class MacPetSpriteAnimator {
             return randomActionClip
         }
         if canUseRandomActions(mood), Date() >= nextRandomActionAt {
-            randomActionClip = chooseRandomAction()
+            randomActionClip = chooseRandomAction(for: mood)
             return randomActionClip!
         }
         return baseClip(for: mood)
@@ -233,8 +233,10 @@ final class MacPetSpriteAnimator {
             height: CGFloat(Self.frameHeight) / CGFloat(Self.sheetHeight))
     }
 
-    private func chooseRandomAction() -> PetAnimationClip {
-        let pool = ["curious_look", "attention_paw", "playful_stretch", "groom_think"]
+    private func chooseRandomAction(for mood: String) -> PetAnimationClip {
+        let pool = mood == "tool_calling"
+            ? ["tool_typing", "curious_look", "attention_paw", "playful_stretch", "groom_think"]
+            : ["curious_look", "attention_paw", "playful_stretch", "groom_think"]
         return Self.clips[pool.randomElement()!]!
     }
 
@@ -243,12 +245,16 @@ final class MacPetSpriteAnimator {
             nextRandomActionAt = .distantFuture
             return
         }
-        let active = ["running", "reasoning"].contains(mood)
+        let active = isActiveCoderMood(mood)
         nextRandomActionAt = Date().addingTimeInterval(Double.random(in: actionFrequencySettings.randomActionDelayRange(active: active)))
     }
 
     private func canUseRandomActions(_ mood: String) -> Bool {
-        ["running", "reasoning"].contains(mood)
+        isActiveCoderMood(mood)
+    }
+
+    private func isActiveCoderMood(_ mood: String) -> Bool {
+        ["running", "reasoning", "tool_calling"].contains(mood)
     }
 
     private func fixedStateClip(for mood: String) -> PetAnimationClip? {
@@ -257,8 +263,6 @@ final class MacPetSpriteAnimator {
             Self.clips["sleepy_nap"]!
         case "waiting":
             Self.clips["waiting_peek"]!
-        case "tool_calling":
-            Self.clips["tool_typing"]!
         case "success":
             Self.clips["success_jump"]!
         case "error":
@@ -274,8 +278,6 @@ final class MacPetSpriteAnimator {
 
     private func baseClip(for mood: String) -> PetAnimationClip {
         switch mood {
-        case "running", "reasoning":
-            Self.clips["curious_look"]!
         case "idle", "sleeping":
             Self.clips["sleepy_nap"]!
         default:
@@ -291,11 +293,11 @@ final class MacPetSpriteAnimator {
             PetAnimationClip("attention_paw", "attention", row(3, 0, 3), 0.210, false, false),
             PetAnimationClip("playful_stretch", "stretch", row(4, 0, 4), 0.240, false, false),
             PetAnimationClip("sleepy_nap", "sleepy", row(5, 0, 7), 0.300, false, false),
-            PetAnimationClip("curious_look", "curious", row(6, 0, 5), 0.260, true, false),
+            PetAnimationClip("curious_look", "curious", row(6, 0, 5), 0.260, false, false),
             PetAnimationClip("happy_beg", "happy", row(7, 0, 5), 0.250, false, false),
             PetAnimationClip("groom_think", "grooming", row(8, 0, 5), 0.260, false, false),
             PetAnimationClip("waiting_peek", "peek", peekFrames(), 0.180, true, false),
-            PetAnimationClip("tool_typing", "typing", typingFrames(), 0.120, true, false),
+            PetAnimationClip("tool_typing", "typing", typingFrames(), 0.120, false, false),
             PetAnimationClip("success_jump", "jump", successJumpFrames(), 0.115, false, false),
             PetAnimationClip("error_shake", "shake", errorShakeFrames(), 0.085, true, false),
             PetAnimationClip("low_battery_curl", "curled", row(5, 2, 7), 0.420, true, false),

@@ -222,7 +222,7 @@ public sealed class PetSpriteAnimator
 
         if (CanUseRandomActions(_mood) && now >= _nextRandomActionAtUtc)
         {
-            _randomActionClip = ChooseRandomAction(_mood);
+            _randomActionClip = ChooseRandomAction();
             return _randomActionClip;
         }
 
@@ -263,11 +263,9 @@ public sealed class PetSpriteAnimator
                 FrameHeight));
     }
 
-    private PetAnimationClip ChooseRandomAction(PetMood mood)
+    private PetAnimationClip ChooseRandomAction()
     {
-        var pool = mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling
-            ? new[] { "curious_look", "attention_paw", "playful_stretch", "groom_think" }
-            : new[] { "curious_look", "attention_paw", "playful_stretch", "sleepy_nap", "happy_beg", "groom_think" };
+        var pool = new[] { "curious_look", "attention_paw", "playful_stretch", "groom_think" };
         return Clip(pool[_random.Next(pool.Length)]);
     }
 
@@ -285,20 +283,20 @@ public sealed class PetSpriteAnimator
             return;
         }
 
-        var minSeconds = _mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling ? 8 : 6;
-        var rangeSeconds = _mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling ? 10 : 8;
+        var minSeconds = IsActiveCoderMood(_mood) ? 8 : 6;
+        var rangeSeconds = IsActiveCoderMood(_mood) ? 10 : 8;
         var delay = TimeSpan.FromSeconds(minSeconds + _random.NextDouble() * rangeSeconds);
         _nextRandomActionAtUtc = now + _actionFrequencySettings.ScaleRandomActionDelay(delay);
     }
 
     private static bool CanUseRandomActions(PetMood mood)
     {
-        return mood is PetMood.Idle or
-            PetMood.Success or
-            PetMood.Offline or
-            PetMood.Running or
-            PetMood.Reasoning or
-            PetMood.ToolCalling;
+        return IsActiveCoderMood(mood);
+    }
+
+    private static bool IsActiveCoderMood(PetMood mood)
+    {
+        return mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling;
     }
 
     private static bool IsUrgentMood(PetMood mood)
@@ -310,7 +308,6 @@ public sealed class PetSpriteAnimator
     {
         return mood switch
         {
-            PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling => Clip("curious_look"),
             PetMood.Sleeping => Clip("sleepy_nap"),
             PetMood.Error or PetMood.WaitingAuthorization or PetMood.PowerWarning => Clip("attention_paw"),
             _ => Clip("seated_blink")
@@ -349,7 +346,7 @@ public sealed class PetSpriteAnimator
             ["attention_paw"] = new PetAnimationClip("attention_paw", "attention", Row(3, 0, 3), TimeSpan.FromMilliseconds(210), Loops: false, FlipsWithDirection: false),
             ["playful_stretch"] = new PetAnimationClip("playful_stretch", "stretch", Row(4, 0, 4), TimeSpan.FromMilliseconds(240), Loops: false, FlipsWithDirection: false),
             ["sleepy_nap"] = new PetAnimationClip("sleepy_nap", "sleepy", Row(5, 0, 7), TimeSpan.FromMilliseconds(300), Loops: false, FlipsWithDirection: false),
-            ["curious_look"] = new PetAnimationClip("curious_look", "curious", Row(6, 0, 5), TimeSpan.FromMilliseconds(260), Loops: true, FlipsWithDirection: false),
+            ["curious_look"] = new PetAnimationClip("curious_look", "curious", Row(6, 0, 5), TimeSpan.FromMilliseconds(260), Loops: false, FlipsWithDirection: false),
             ["happy_beg"] = new PetAnimationClip("happy_beg", "happy", Row(7, 0, 5), TimeSpan.FromMilliseconds(250), Loops: false, FlipsWithDirection: false),
             ["groom_think"] = new PetAnimationClip("groom_think", "grooming", Row(8, 0, 5), TimeSpan.FromMilliseconds(260), Loops: false, FlipsWithDirection: false)
         };

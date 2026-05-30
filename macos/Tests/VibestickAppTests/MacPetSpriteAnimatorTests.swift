@@ -82,6 +82,17 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         XCTAssertEqual(frame.pose, "sleepy")
     }
 
+    func testActiveCoderMoodsUseNeutralBaseClipBetweenFrequencyGatedActions() {
+        for mood in ["running", "reasoning", "tool_calling"] {
+            let animator = MacPetSpriteAnimator()
+
+            animator.setMood(mood)
+
+            XCTAssertEqual(animator.frame.clipName, "seated_blink", "mood: \(mood)")
+            XCTAssertEqual(animator.frame.pose, "seated", "mood: \(mood)")
+        }
+    }
+
     func testCrawlDirectionOverridesHoveringAttentionClip() {
         let animator = MacPetSpriteAnimator()
 
@@ -167,7 +178,7 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         XCTAssertFalse(frame.flipsWithDirection)
     }
 
-    func testHoveringOverridesFixedMoodAndClearingHoverRestoresMoodClip() {
+    func testHoveringOverridesActiveMoodAndClearingHoverRestoresNeutralClip() {
         let animator = MacPetSpriteAnimator()
 
         animator.setMood("tool_calling")
@@ -178,8 +189,8 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
 
         animator.setHovering(false)
 
-        XCTAssertEqual(animator.frame.clipName, "tool_typing")
-        XCTAssertEqual(animator.frame.pose, "typing")
+        XCTAssertEqual(animator.frame.clipName, "seated_blink")
+        XCTAssertEqual(animator.frame.pose, "seated")
     }
 
     func testDragDirectionHelperUsesHorizontalDelta() {
@@ -325,37 +336,52 @@ final class MacPetResizeGeometryTests: XCTestCase {
         XCTAssertEqual(size.height, 714)
     }
 
-    func testResizeHitAcceptsSpriteBottomRightHandleOnly() {
-        let spriteFrame = NSRect(x: 68, y: 10, width: 220, height: 210)
-        let handleFrame = MacPetResizeGeometry.handleFrame(spriteFrame: spriteFrame, scale: 1.0)
+    func testResizeHitAcceptsPetSpriteBottomRightHandleOnly() {
+        let petFrame = NSRect(x: 81, y: 109, width: 194, height: 210)
+        let handleFrame = MacPetResizeGeometry.handleFrame(anchorFrame: petFrame, scale: 1.0)
 
         XCTAssertTrue(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 270, y: 34),
+            point: NSPoint(x: 258, y: 126),
             handleFrame: handleFrame))
         XCTAssertTrue(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 292, y: 12),
+            point: NSPoint(x: 280, y: 104),
             handleFrame: handleFrame))
         XCTAssertFalse(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 76, y: 190),
+            point: NSPoint(x: 105, y: 126),
             handleFrame: handleFrame))
         XCTAssertFalse(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 178, y: 120),
+            point: NSPoint(x: 178, y: 220),
             handleFrame: handleFrame))
     }
 
-    func testResizeHandleFramesScaleFromSpriteBottomRight() {
-        let spriteFrame = NSRect(x: 68, y: 10, width: 220, height: 210)
+    func testResizeHandleFramesScaleFromPetSpriteBottomRight() {
+        let petFrame = NSRect(x: 81, y: 109, width: 194, height: 210)
 
-        let defaultFrame = MacPetResizeGeometry.handleFrame(spriteFrame: spriteFrame, scale: 1.0)
+        let defaultFrame = MacPetResizeGeometry.handleFrame(anchorFrame: petFrame, scale: 1.0)
         XCTAssertEqual(defaultFrame.width, 34)
         XCTAssertEqual(defaultFrame.height, 34)
-        XCTAssertEqual(defaultFrame.maxX, spriteFrame.maxX + 12)
-        XCTAssertEqual(defaultFrame.minY, spriteFrame.minY - 4)
+        XCTAssertEqual(defaultFrame.maxX, petFrame.maxX + 12)
+        XCTAssertEqual(defaultFrame.minY, petFrame.minY - 4)
 
-        let scaledFrame = MacPetResizeGeometry.handleFrame(spriteFrame: spriteFrame, scale: 1.5)
+        let scaledPetFrame = NSRect(x: 121.5, y: 163.5, width: 291, height: 315)
+        let scaledFrame = MacPetResizeGeometry.handleFrame(anchorFrame: scaledPetFrame, scale: 1.5)
         XCTAssertEqual(scaledFrame.width, 51)
         XCTAssertEqual(scaledFrame.height, 51)
-        XCTAssertEqual(scaledFrame.maxX, spriteFrame.maxX + 18)
-        XCTAssertEqual(scaledFrame.minY, spriteFrame.minY - 6)
+        XCTAssertEqual(scaledFrame.maxX, scaledPetFrame.maxX + 18)
+        XCTAssertEqual(scaledFrame.minY, scaledPetFrame.minY - 6)
+    }
+
+    func testResizeHandleFrameUsesBottomRightInFlippedHostingCoordinates() {
+        let petFrame = NSRect(x: 49.4, y: 96.2, width: 118.3, height: 128.1)
+
+        let frame = MacPetResizeGeometry.handleFrame(
+            anchorFrame: petFrame,
+            scale: 0.61,
+            isFlipped: true)
+
+        XCTAssertEqual(frame.width, 20.74, accuracy: 0.001)
+        XCTAssertEqual(frame.height, 20.74, accuracy: 0.001)
+        XCTAssertEqual(frame.maxX, petFrame.maxX + 7.32, accuracy: 0.001)
+        XCTAssertEqual(frame.minY, petFrame.maxY - 20.74 + 2.44, accuracy: 0.001)
     }
 }
