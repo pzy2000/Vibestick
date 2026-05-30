@@ -99,10 +99,10 @@ final class MacPetPanelEndToEndTests: XCTestCase {
             x: screen.visibleFrame.maxX - panel.frame.width + 20,
             y: screen.visibleFrame.maxY - panel.frame.height + 20))
         panel.beginResizing()
-        panel.resize(byDragDelta: NSPoint(x: 220, y: 20))
+        panel.resize(byDragDelta: NSPoint(x: 55, y: 20))
         panel.finishResizing()
 
-        XCTAssertEqual(panel.petScale, 1.5, accuracy: 0.0001)
+        XCTAssertEqual(panel.petScale, 1.25, accuracy: 0.0001)
         let containingVisibleFrame = NSScreen.screens
             .map(\.visibleFrame)
             .first { $0.insetBy(dx: -0.5, dy: -0.5).contains(panel.frame) }
