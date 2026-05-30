@@ -127,6 +127,19 @@ final class MacPetPanelEndToEndTests: XCTestCase {
         XCTAssertEqual(defaults.double(forKey: "VibestickPetWindowScale"), 0.75, accuracy: 0.0001)
     }
 
+    func testResizeHandleVisibilityCanBeDrivenByHoverState() {
+        let panel = makePanel()
+        defer { panel.close() }
+
+        XCTAssertFalse(panel.isResizeHandleVisible)
+
+        panel.setResizeHandleHovering(true)
+        XCTAssertTrue(panel.isResizeHandleVisible)
+
+        panel.setResizeHandleHovering(false)
+        XCTAssertFalse(panel.isResizeHandleVisible)
+    }
+
     func testPanelLoadsAndAppliesActionFrequencySettings() {
         let defaults = UserDefaults.standard
         let snapshot = saveDefaults(

@@ -1565,15 +1565,18 @@ private final class PetPanelState: ObservableObject {
     @Published var cardDisplayMode: PetCardDisplayMode
     @Published var isPresenceReduced: Bool
     @Published var scale: CGFloat
+    @Published var resizeHandleVisible: Bool
 
     init(
         cardDisplayMode: PetCardDisplayMode,
         isPresenceReduced: Bool = false,
-        scale: CGFloat = MacPetResizeGeometry.defaultScale)
+        scale: CGFloat = MacPetResizeGeometry.defaultScale,
+        resizeHandleVisible: Bool = false)
     {
         self.cardDisplayMode = cardDisplayMode
         self.isPresenceReduced = isPresenceReduced
         self.scale = MacPetResizeGeometry.clampedScale(scale)
+        self.resizeHandleVisible = resizeHandleVisible
     }
 }
 
@@ -1603,7 +1606,10 @@ enum MacPetResizeGeometry {
     static let maxScale: CGFloat = 1.5
     static let dragDivisor: CGFloat = 220
     static let hitPadding: CGFloat = 16
-    static let hitSpriteYRatio: CGFloat = 0.45
+    static let handleSize: CGFloat = 34
+    static let handleHitPadding: CGFloat = 6
+    static let handleTrailingOffset: CGFloat = 12
+    static let handleBottomOffset: CGFloat = -4
     static let basePanelSize = CGSize(width: 356, height: 476)
     static let baseSpriteLaneSize = CGSize(width: MacPetWalkGeometry.spriteLaneWidth, height: 210)
 
@@ -1633,11 +1639,22 @@ enum MacPetResizeGeometry {
             height: size.height)
     }
 
-    static func isResizeHit(point: NSPoint, spriteFrame: NSRect) -> Bool {
-        point.x >= spriteFrame.minX - hitPadding &&
-            point.x <= spriteFrame.maxX + hitPadding &&
-            point.y >= spriteFrame.minY + spriteFrame.height * hitSpriteYRatio &&
-            point.y <= spriteFrame.maxY + hitPadding
+    static func handleFrame(spriteFrame: NSRect, scale: CGFloat) -> NSRect {
+        let clamped = clampedScale(scale)
+        let side = handleSize * clamped
+        return NSRect(
+            x: spriteFrame.maxX + handleTrailingOffset * clamped - side,
+            y: spriteFrame.minY + handleBottomOffset * clamped,
+            width: side,
+            height: side)
+    }
+
+    static func hitFrame(handleFrame: NSRect, scale: CGFloat) -> NSRect {
+        handleFrame.insetBy(dx: -handleHitPadding * clampedScale(scale), dy: -handleHitPadding * clampedScale(scale))
+    }
+
+    static func isResizeHit(point: NSPoint, handleFrame: NSRect, scale: CGFloat = defaultScale) -> Bool {
+        hitFrame(handleFrame: handleFrame, scale: scale).contains(point)
     }
 }
 
@@ -1759,7 +1776,16 @@ final class PetPanel: NSPanel, NSMenuDelegate {
             let spriteFrame = MacPetResizeGeometry.spriteFrame(
                 hostBounds: hosting.bounds,
                 scale: self.petScale)
-            return MacPetResizeGeometry.isResizeHit(point: point, spriteFrame: spriteFrame)
+            let handleFrame = MacPetResizeGeometry.handleFrame(
+                spriteFrame: spriteFrame,
+                scale: self.petScale)
+            return MacPetResizeGeometry.isResizeHit(
+                point: point,
+                handleFrame: handleFrame,
+                scale: self.petScale)
+        }
+        hosting.onResizeHoverChanged = { [weak self] hovering in
+            self?.setResizeHandleHovering(hovering)
         }
         hosting.onResizeStart = { [weak self] in
             self?.beginResizing()
@@ -1798,6 +1824,10 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     var petScale: CGFloat {
         panelState.scale
+    }
+
+    var isResizeHandleVisible: Bool {
+        panelState.resizeHandleVisible
     }
 
     var petActionFrequencySettings: MacPetActionFrequencySettings {
@@ -1860,6 +1890,13 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     func cycleCardDisplayMode() {
         setCardDisplayMode(panelState.cardDisplayMode.next)
+    }
+
+    func setResizeHandleHovering(_ hovering: Bool) {
+        guard panelState.resizeHandleVisible != hovering else {
+            return
+        }
+        panelState.resizeHandleVisible = hovering
     }
 
     fileprivate func setPresenceMode(_ mode: PetPresenceMode) {
@@ -2556,6 +2593,7 @@ private final class PetHostingView: NSHostingView<PetView> {
     var onDragTo: ((NSPoint, CGFloat) -> Void)?
     var onDragEnd: (() -> Void)?
     var isResizeHit: ((NSPoint) -> Bool)?
+    var onResizeHoverChanged: ((Bool) -> Void)?
     var onResizeStart: (() -> Void)?
     var onResizeTo: ((NSPoint) -> Void)?
     var onResizeEnd: (() -> Void)?
@@ -2568,6 +2606,32 @@ private final class PetHostingView: NSHostingView<PetView> {
 
     private let dragThreshold: CGFloat = 4
     private var pendingPrimaryClick: DispatchWorkItem?
+    private var resizeHovering = false
+    private var resizeTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let resizeTrackingArea, trackingAreas.contains(where: { $0 === resizeTrackingArea }) {
+            removeTrackingArea(resizeTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved],
+            owner: self,
+            userInfo: nil)
+        resizeTrackingArea = trackingArea
+        addTrackingArea(trackingArea)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateResizeHover(at: convert(event.locationInWindow, from: nil))
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setResizeHovering(false)
+        super.mouseExited(with: event)
+    }
 
     override func rightMouseDown(with event: NSEvent) {
         cancelPendingPrimaryClick()
@@ -2605,6 +2669,18 @@ private final class PetHostingView: NSHostingView<PetView> {
         petContextMenu
     }
 
+    private func updateResizeHover(at point: NSPoint) {
+        setResizeHovering(isResizeHit?(point) == true)
+    }
+
+    private func setResizeHovering(_ hovering: Bool) {
+        guard resizeHovering != hovering else {
+            return
+        }
+        resizeHovering = hovering
+        onResizeHoverChanged?(hovering)
+    }
+
     private func showPetContextMenu(with event: NSEvent) {
         guard let petContextMenu else {
             super.rightMouseDown(with: event)
@@ -2624,6 +2700,7 @@ private final class PetHostingView: NSHostingView<PetView> {
         let startWindowOrigin = window.frame.origin
         let startViewLocation = convert(event.locationInWindow, from: nil)
         let interaction: PetHostingPointerInteraction = isResizeHit?(startViewLocation) == true ? .resize : .move
+        setResizeHovering(interaction == .resize)
         var lastMouseLocation = startMouseLocation
         var isDragging = false
 
@@ -2748,6 +2825,7 @@ private struct PetView: View {
                     .blur(radius: 4)
                     .offset(y: 7)
                 sprite
+                resizeHandle
             }
             .frame(width: MacPetWalkGeometry.spriteLaneWidth, height: 210)
             .contentShape(Rectangle())
@@ -2762,6 +2840,32 @@ private struct PetView: View {
     private var sprite: some View {
         MacPetSpriteRepresentable(spriteLayerView: spriteLayerView)
             .frame(width: 194, height: 210)
+    }
+
+    @ViewBuilder
+    private var resizeHandle: some View {
+        if panelState.resizeHandleVisible {
+            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.primary)
+                .frame(
+                    width: MacPetResizeGeometry.handleSize,
+                    height: MacPetResizeGeometry.handleSize)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(.white.opacity(0.35), lineWidth: 1))
+                .shadow(color: .black.opacity(0.22), radius: 8, x: 0, y: 3)
+                .frame(
+                    width: MacPetWalkGeometry.spriteLaneWidth,
+                    height: 210,
+                    alignment: .bottomTrailing)
+                .offset(
+                    x: MacPetResizeGeometry.handleTrailingOffset,
+                    y: -MacPetResizeGeometry.handleBottomOffset)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     @ViewBuilder

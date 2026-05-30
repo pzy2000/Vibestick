@@ -325,20 +325,37 @@ final class MacPetResizeGeometryTests: XCTestCase {
         XCTAssertEqual(size.height, 714)
     }
 
-    func testResizeHitAcceptsSpriteLowerHalfWithPadding() {
+    func testResizeHitAcceptsSpriteBottomRightHandleOnly() {
         let spriteFrame = NSRect(x: 68, y: 10, width: 220, height: 210)
+        let handleFrame = MacPetResizeGeometry.handleFrame(spriteFrame: spriteFrame, scale: 1.0)
 
         XCTAssertTrue(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 60, y: 105),
-            spriteFrame: spriteFrame))
+            point: NSPoint(x: 270, y: 34),
+            handleFrame: handleFrame))
         XCTAssertTrue(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 288, y: 220),
-            spriteFrame: spriteFrame))
+            point: NSPoint(x: 292, y: 12),
+            handleFrame: handleFrame))
         XCTAssertFalse(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 178, y: 90),
-            spriteFrame: spriteFrame))
+            point: NSPoint(x: 76, y: 190),
+            handleFrame: handleFrame))
         XCTAssertFalse(MacPetResizeGeometry.isResizeHit(
-            point: NSPoint(x: 310, y: 130),
-            spriteFrame: spriteFrame))
+            point: NSPoint(x: 178, y: 120),
+            handleFrame: handleFrame))
+    }
+
+    func testResizeHandleFramesScaleFromSpriteBottomRight() {
+        let spriteFrame = NSRect(x: 68, y: 10, width: 220, height: 210)
+
+        let defaultFrame = MacPetResizeGeometry.handleFrame(spriteFrame: spriteFrame, scale: 1.0)
+        XCTAssertEqual(defaultFrame.width, 34)
+        XCTAssertEqual(defaultFrame.height, 34)
+        XCTAssertEqual(defaultFrame.maxX, spriteFrame.maxX + 12)
+        XCTAssertEqual(defaultFrame.minY, spriteFrame.minY - 4)
+
+        let scaledFrame = MacPetResizeGeometry.handleFrame(spriteFrame: spriteFrame, scale: 1.5)
+        XCTAssertEqual(scaledFrame.width, 51)
+        XCTAssertEqual(scaledFrame.height, 51)
+        XCTAssertEqual(scaledFrame.maxX, spriteFrame.maxX + 18)
+        XCTAssertEqual(scaledFrame.minY, spriteFrame.minY - 6)
     }
 }
