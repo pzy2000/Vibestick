@@ -62,6 +62,8 @@ private enum PetFocusPreference: String {
 }
 
 struct MacPetActionFrequencySettings: Equatable {
+    static let randomActionMinMultiplier: Double = 0.05
+    static let randomActionStep: Double = 0.05
     static let minMultiplier: Double = 0.5
     static let maxMultiplier: Double = 2.0
     static let step: Double = 0.1
@@ -80,7 +82,7 @@ struct MacPetActionFrequencySettings: Equatable {
 
     var clamped: MacPetActionFrequencySettings {
         MacPetActionFrequencySettings(
-            randomActionFrequency: Self.clamp(randomActionFrequency),
+            randomActionFrequency: Self.clampRandomActionFrequency(randomActionFrequency),
             walkSpeedMultiplier: Self.clamp(walkSpeedMultiplier),
             wanderFrequency: Self.clamp(wanderFrequency))
     }
@@ -105,7 +107,7 @@ struct MacPetActionFrequencySettings: Equatable {
     }
 
     func scaledRandomActionDelay(_ delay: TimeInterval) -> TimeInterval {
-        max(0.1, delay / Self.clamp(randomActionFrequency))
+        max(0.1, delay / Self.clampRandomActionFrequency(randomActionFrequency))
     }
 
     func scaledWalkSpeed(_ speed: CGFloat) -> CGFloat {
@@ -122,6 +124,14 @@ struct MacPetActionFrequencySettings: Equatable {
         }
         let snapped = (value / step).rounded() * step
         return min(max(snapped, minMultiplier), maxMultiplier)
+    }
+
+    static func clampRandomActionFrequency(_ value: Double) -> Double {
+        guard value.isFinite else {
+            return 1
+        }
+        let snapped = (value / randomActionStep).rounded() * randomActionStep
+        return min(max(snapped, randomActionMinMultiplier), maxMultiplier)
     }
 
     private static func loadMultiplier(forKey key: String, defaults: UserDefaults) -> Double {
@@ -1453,6 +1463,8 @@ struct ControlPanelView: View {
                     .font(.headline)
                 PetFrequencySlider(
                     title: "随机动作频率",
+                    range: MacPetActionFrequencySettings.randomActionMinMultiplier...MacPetActionFrequencySettings.maxMultiplier,
+                    step: MacPetActionFrequencySettings.randomActionStep,
                     value: Binding(
                         get: { viewModel.petActionFrequencySettings.randomActionFrequency },
                         set: { viewModel.setRandomActionFrequency($0) }))
@@ -1481,6 +1493,8 @@ struct ControlPanelView: View {
 
 private struct PetFrequencySlider: View {
     let title: String
+    var range: ClosedRange<Double> = MacPetActionFrequencySettings.minMultiplier...MacPetActionFrequencySettings.maxMultiplier
+    var step: Double = MacPetActionFrequencySettings.step
     @Binding var value: Double
 
     var body: some View {
@@ -1490,15 +1504,22 @@ private struct PetFrequencySlider: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(String(format: "%.1fx", value))
+                Text(formattedMultiplier(value))
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             Slider(
                 value: $value,
-                in: MacPetActionFrequencySettings.minMultiplier...MacPetActionFrequencySettings.maxMultiplier,
-                step: MacPetActionFrequencySettings.step)
+                in: range,
+                step: step)
         }
+    }
+
+    private func formattedMultiplier(_ value: Double) -> String {
+        if value < 0.1 {
+            return String(format: "%.2fx", value)
+        }
+        return String(format: "%.1fx", value)
     }
 }
 

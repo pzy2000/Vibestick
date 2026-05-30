@@ -6,13 +6,24 @@ import XCTest
 final class MacPetSpriteAnimatorTests: XCTestCase {
     func testActionFrequencySettingsClampToSupportedRange() {
         let settings = MacPetActionFrequencySettings(
-            randomActionFrequency: 0.1,
+            randomActionFrequency: 0.01,
             walkSpeedMultiplier: 1.04,
             wanderFrequency: 2.8).clamped
 
-        XCTAssertEqual(settings.randomActionFrequency, 0.5)
+        XCTAssertEqual(settings.randomActionFrequency, 0.05)
         XCTAssertEqual(settings.walkSpeedMultiplier, 1.0)
         XCTAssertEqual(settings.wanderFrequency, 2.0)
+    }
+
+    func testRandomActionFrequencyKeepsLowValuesBelowWalkingMinimum() {
+        let settings = MacPetActionFrequencySettings(
+            randomActionFrequency: 0.05,
+            walkSpeedMultiplier: 0.05,
+            wanderFrequency: 0.05).clamped
+
+        XCTAssertEqual(settings.randomActionFrequency, 0.05)
+        XCTAssertEqual(settings.walkSpeedMultiplier, 0.5)
+        XCTAssertEqual(settings.wanderFrequency, 0.5)
     }
 
     func testActionFrequencySettingsScaleBehaviorIntervals() {

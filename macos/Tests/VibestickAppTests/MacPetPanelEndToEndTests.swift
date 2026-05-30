@@ -135,14 +135,14 @@ final class MacPetPanelEndToEndTests: XCTestCase {
             "VibestickPetWanderFrequency")
         defer { restore(snapshot, in: defaults) }
 
-        defaults.set(1.6, forKey: "VibestickPetRandomActionFrequency")
+        defaults.set(0.05, forKey: "VibestickPetRandomActionFrequency")
         defaults.set(0.7, forKey: "VibestickPetWalkSpeedMultiplier")
         defaults.set(1.3, forKey: "VibestickPetWanderFrequency")
 
         let panel = makePanel()
         defer { panel.close() }
 
-        XCTAssertEqual(panel.petActionFrequencySettings.randomActionFrequency, 1.6, accuracy: 0.0001)
+        XCTAssertEqual(panel.petActionFrequencySettings.randomActionFrequency, 0.05, accuracy: 0.0001)
         XCTAssertEqual(panel.petActionFrequencySettings.walkSpeedMultiplier, 0.7, accuracy: 0.0001)
         XCTAssertEqual(panel.petActionFrequencySettings.wanderFrequency, 1.3, accuracy: 0.0001)
 

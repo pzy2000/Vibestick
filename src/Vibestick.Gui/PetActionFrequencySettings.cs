@@ -2,6 +2,8 @@ namespace Vibestick.Gui;
 
 public sealed record PetActionFrequencySettings
 {
+    public const double RandomActionMinMultiplier = 0.05;
+    public const double RandomActionStep = 0.05;
     public const double MinMultiplier = 0.5;
     public const double MaxMultiplier = 2.0;
     public const double Step = 0.1;
@@ -16,7 +18,7 @@ public sealed record PetActionFrequencySettings
     {
         return this with
         {
-            RandomActionFrequency = ClampMultiplier(RandomActionFrequency),
+            RandomActionFrequency = ClampRandomActionFrequency(RandomActionFrequency),
             WalkSpeedMultiplier = ClampMultiplier(WalkSpeedMultiplier),
             WanderFrequency = ClampMultiplier(WanderFrequency)
         };
@@ -24,7 +26,7 @@ public sealed record PetActionFrequencySettings
 
     public TimeSpan ScaleRandomActionDelay(TimeSpan delay)
     {
-        return ScaleDuration(delay, RandomActionFrequency);
+        return ScaleDuration(delay, ClampRandomActionFrequency(RandomActionFrequency));
     }
 
     public double ScaleWalkSpeed(double speed)
@@ -34,7 +36,7 @@ public sealed record PetActionFrequencySettings
 
     public TimeSpan ScaleWanderInterval(TimeSpan interval)
     {
-        return ScaleDuration(interval, WanderFrequency);
+        return ScaleDuration(interval, ClampMultiplier(WanderFrequency));
     }
 
     public static double ClampMultiplier(double value)
@@ -48,10 +50,20 @@ public sealed record PetActionFrequencySettings
         return Math.Min(Math.Max(snapped, MinMultiplier), MaxMultiplier);
     }
 
-    private static TimeSpan ScaleDuration(TimeSpan duration, double multiplier)
+    public static double ClampRandomActionFrequency(double value)
     {
-        var clamped = ClampMultiplier(multiplier);
-        var ticks = Math.Max(1, (long)Math.Round(duration.Ticks / clamped, MidpointRounding.AwayFromZero));
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return 1.0;
+        }
+
+        var snapped = Math.Round(value / RandomActionStep, MidpointRounding.AwayFromZero) * RandomActionStep;
+        return Math.Min(Math.Max(snapped, RandomActionMinMultiplier), MaxMultiplier);
+    }
+
+    private static TimeSpan ScaleDuration(TimeSpan duration, double clampedMultiplier)
+    {
+        var ticks = Math.Max(1, (long)Math.Round(duration.Ticks / clampedMultiplier, MidpointRounding.AwayFromZero));
         return TimeSpan.FromTicks(ticks);
     }
 }

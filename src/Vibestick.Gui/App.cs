@@ -689,7 +689,10 @@ public sealed class MainWindow : Window
             _randomActionFrequencySlider,
             _randomActionFrequencyValue,
             "Random actions",
-            _petActionFrequencySettings.RandomActionFrequency);
+            _petActionFrequencySettings.RandomActionFrequency,
+            PetActionFrequencySettings.RandomActionMinMultiplier,
+            PetActionFrequencySettings.MaxMultiplier,
+            PetActionFrequencySettings.RandomActionStep);
         AddFrequencySlider(
             root,
             _walkSpeedMultiplierSlider,
@@ -711,7 +714,10 @@ public sealed class MainWindow : Window
         Slider slider,
         TextBlock valueText,
         string label,
-        double value)
+        double value,
+        double minimum = PetActionFrequencySettings.MinMultiplier,
+        double maximum = PetActionFrequencySettings.MaxMultiplier,
+        double tickFrequency = PetActionFrequencySettings.Step)
     {
         var row = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
         var header = new DockPanel { LastChildFill = true };
@@ -728,11 +734,11 @@ public sealed class MainWindow : Window
         });
         row.Children.Add(header);
 
-        slider.Minimum = PetActionFrequencySettings.MinMultiplier;
-        slider.Maximum = PetActionFrequencySettings.MaxMultiplier;
-        slider.TickFrequency = PetActionFrequencySettings.Step;
-        slider.SmallChange = PetActionFrequencySettings.Step;
-        slider.LargeChange = PetActionFrequencySettings.Step * 5;
+        slider.Minimum = minimum;
+        slider.Maximum = maximum;
+        slider.TickFrequency = tickFrequency;
+        slider.SmallChange = tickFrequency;
+        slider.LargeChange = tickFrequency * 5;
         slider.IsSnapToTickEnabled = true;
         slider.AutoToolTipPlacement = AutoToolTipPlacement.TopLeft;
         slider.Value = value;
@@ -787,7 +793,9 @@ public sealed class MainWindow : Window
 
     private static void UpdateFrequencyValueText(TextBlock valueText, double value)
     {
-        valueText.Text = $"{PetActionFrequencySettings.ClampMultiplier(value):0.0}x";
+        valueText.Text = value < PetActionFrequencySettings.MinMultiplier
+            ? $"{value:0.00}x"
+            : $"{value:0.0}x";
     }
 
     public void RefreshPetLibraryUi()

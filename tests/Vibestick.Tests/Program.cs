@@ -1432,7 +1432,7 @@ internal static class Program
                   "Top": 120,
                   "Scale": 1.0,
                   "WalkingEnabled": false,
-                  "RandomActionFrequency": 1.6,
+                  "RandomActionFrequency": 0.05,
                   "WalkSpeedMultiplier": 0.7,
                   "WanderFrequency": 1.3
                 }
@@ -1459,7 +1459,7 @@ internal static class Program
             var frequency = snapshot["actionFrequency"] ??
                 throw new InvalidOperationException("Snapshot missing action frequency settings.");
 
-            AssertNear(1.6, frequency["randomActionFrequency"]?.GetValue<double>() ?? 0, 0.001, "random action frequency");
+            AssertNear(0.05, frequency["randomActionFrequency"]?.GetValue<double>() ?? 0, 0.001, "random action frequency");
             AssertNear(0.7, frequency["walkSpeedMultiplier"]?.GetValue<double>() ?? 0, 0.001, "walk speed multiplier");
             AssertNear(1.3, frequency["wanderFrequency"]?.GetValue<double>() ?? 0, 0.001, "wander frequency");
         }
