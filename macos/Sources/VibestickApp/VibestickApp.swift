@@ -2282,14 +2282,19 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         nextFrame.size = MacPetResizeGeometry.scaledSize(
             baseSize: MacPetResizeGeometry.basePanelSize,
             scale: nextScale)
-        let preferredScreenIdentifier = preferRetainedScreen ? retainedScreenIdentifier : nil
-        setFrame(Self.clampedFrame(nextFrame, preferredScreenIdentifier: preferredScreenIdentifier), display: true)
+        let nextClampedFrame = preferRetainedScreen
+            ? Self.clampedFrame(nextFrame, preferredScreenIdentifier: retainedScreenIdentifier)
+            : Self.clampedFrame(nextFrame, on: screen ?? NSScreen.main)
+        setFrame(nextClampedFrame, display: true)
     }
 
     private func clampedOrigin(_ origin: NSPoint, preferRetainedScreen: Bool = true) -> NSPoint {
         var nextFrame = frame
         nextFrame.origin = origin
-        guard let targetScreen = targetScreen(for: nextFrame, preferRetainedScreen: preferRetainedScreen) else {
+        let targetScreen = preferRetainedScreen
+            ? targetScreen(for: nextFrame, preferRetainedScreen: true)
+            : (screen ?? NSScreen.main ?? Self.screen(containing: nextFrame))
+        guard let targetScreen else {
             return origin
         }
 
@@ -2488,8 +2493,16 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private static func clampedFrame(_ frame: NSRect, preferredScreenIdentifier: String?) -> NSRect {
-        var next = frame
         guard let targetScreen = screen(identifier: preferredScreenIdentifier) ?? screen(containing: frame) ?? NSScreen.main else {
+            return frame
+        }
+
+        return clampedFrame(frame, on: targetScreen)
+    }
+
+    private static func clampedFrame(_ frame: NSRect, on targetScreen: NSScreen?) -> NSRect {
+        var next = frame
+        guard let targetScreen else {
             return next
         }
 
