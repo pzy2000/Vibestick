@@ -570,8 +570,8 @@ public sealed class MainWindow : Window
         controlsColumn.Children.Add(controlsPanel);
         controlsColumn.Children.Add(new Border
         {
-            Margin = new Thickness(0, 16, 0, 0),
-            Padding = new Thickness(10),
+            Margin = new Thickness(0, 6, 0, 0),
+            Padding = new Thickness(4),
             Background = Brushes.White,
             BorderBrush = Brush("#e1e5ee"),
             BorderThickness = new Thickness(1),
@@ -721,7 +721,7 @@ public sealed class MainWindow : Window
         double maximum = PetActionFrequencySettings.MaxMultiplier,
         double tickFrequency = PetActionFrequencySettings.Step)
     {
-        var row = new Grid { Margin = new Thickness(0, 0, 0, 2) };
+        var row = new Grid();
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
