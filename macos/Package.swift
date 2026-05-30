@@ -17,6 +17,9 @@ let package = Package(
     targets: [
         .target(
             name: "VibestickMacCore",
+            resources: [
+                .process("Resources")
+            ],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("AppKit"),

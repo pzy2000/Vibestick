@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import VibestickMacCore
 @testable import VibestickApp
 
 @MainActor
@@ -80,6 +81,60 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         let frame = animator.frame
         XCTAssertEqual(frame.clipName, "sleepy_nap")
         XCTAssertEqual(frame.pose, "sleepy")
+    }
+
+    func testHappyMoodUsesHappyBegClip() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setMood("happy")
+
+        let frame = animator.frame
+        XCTAssertEqual(frame.clipName, "happy_beg")
+        XCTAssertEqual(frame.pose, "happy")
+        XCTAssertEqual(frame.row, 7)
+    }
+
+    func testSadMoodUsesCurledClip() {
+        let animator = MacPetSpriteAnimator()
+
+        animator.setMood("sad")
+
+        let frame = animator.frame
+        XCTAssertEqual(frame.clipName, "low_battery_curl")
+        XCTAssertEqual(frame.pose, "curled")
+        XCTAssertEqual(frame.row, 5)
+    }
+
+    func testActivityOverlayPromotesStudyToHappyMood() {
+        let pet = PetStateResolver().resolve(status: defaultPetStatus(), coders: [])
+        let activity = activityObservation(category: AppActivityCategory.study)
+
+        let display = VibestickViewModel.petDisplayState(pet: pet, coders: [], activity: activity)
+
+        XCTAssertEqual(display.mood, "happy")
+        XCTAssertEqual(display.title, "学习中")
+        XCTAssertTrue(display.message.contains("很开心"))
+    }
+
+    func testActivityOverlayDoesNotOverrideImportantCoderStates() {
+        let coders = [
+            CoderAgentStatus(
+                agent: "codex",
+                phase: .error,
+                message: "boom",
+                workspace: nil,
+                processId: nil,
+                updatedAtUtc: Date(timeIntervalSince1970: 10),
+                ttlSeconds: nil)
+        ]
+        let pet = PetStateResolver().resolve(status: defaultPetStatus(), coders: coders)
+        let activity = activityObservation(category: AppActivityCategory.study)
+
+        let display = VibestickViewModel.petDisplayState(pet: pet, coders: coders, activity: activity)
+
+        XCTAssertEqual(display.mood, pet.mood)
+        XCTAssertEqual(display.title, pet.title)
+        XCTAssertEqual(display.message, pet.message)
     }
 
     func testActiveCoderMoodsUseNeutralBaseClipBetweenFrequencyGatedActions() {
@@ -384,4 +439,29 @@ final class MacPetResizeGeometryTests: XCTestCase {
         XCTAssertEqual(frame.maxX, petFrame.maxX + 7.32, accuracy: 0.001)
         XCTAssertEqual(frame.minY, petFrame.maxY - 20.74 + 2.44, accuracy: 0.001)
     }
+
+}
+
+private func defaultPetStatus() -> VibestickStatus {
+    VibestickStatus(
+        activeMode: .off,
+        restorePending: false,
+        pmset: nil,
+        battery: BatteryInfo(percentage: nil, isACConnected: false, isAvailable: false),
+        longTasks: [],
+        assertionActive: false)
+}
+
+private func activityObservation(category: AppActivityCategory) -> AppActivityObservation {
+    AppActivityObservation(
+        observedAtUtc: Date(timeIntervalSince1970: 10),
+        category: category,
+        appName: "Codex",
+        bundleIdentifier: "com.openai.codex",
+        processId: 42,
+        browserTitle: nil,
+        browserURL: nil,
+        matchedRuleId: "test",
+        matchedField: "bundle_identifier",
+        matchedValue: "com.openai.codex")
 }

@@ -263,6 +263,10 @@ final class MacPetSpriteAnimator {
             Self.clips["sleepy_nap"]!
         case "waiting":
             Self.clips["waiting_peek"]!
+        case "happy":
+            Self.clips["happy_beg"]!
+        case "sad":
+            Self.clips["low_battery_curl"]!
         case "success":
             Self.clips["success_jump"]!
         case "error":
@@ -280,6 +284,10 @@ final class MacPetSpriteAnimator {
         switch mood {
         case "idle", "sleeping":
             Self.clips["sleepy_nap"]!
+        case "happy":
+            Self.clips["happy_beg"]!
+        case "sad":
+            Self.clips["low_battery_curl"]!
         default:
             Self.clips["seated_blink"]!
         }

@@ -726,6 +726,7 @@ final class VibestickViewModel: ObservableObject {
     @Published var petTitle = "Vibestick"
     @Published var petMessage = "正在读取状态..."
     @Published var petCoders: [CoderAgentStatus] = []
+    @Published var activityObservation: AppActivityObservation?
     @Published var pets: [PetDefinition] = []
     @Published var currentPet: PetDefinition
     @Published var petLibraryMessage = ""
@@ -753,6 +754,7 @@ final class VibestickViewModel: ObservableObject {
     private let deviceWatcherInstaller: DeviceWatcherInstalling
     let petLibrary: PetLibrary
     private let coderSource: CompositeCoderStatusSource
+    private let activityInspector: AppActivityInspector
     private let codexStatusBridge: CodexSessionStatusBridge?
     private let petResolver = PetStateResolver()
     private var refreshTimer: Timer?
@@ -816,6 +818,7 @@ final class VibestickViewModel: ObservableObject {
             JsonFileCoderStatusSource(directory: configuration.coderStatusDirectory),
             ProcessCoderStatusSource(processInspector: processInspector, processNames: VibestickOptions().longTaskProcessNames)
         ])
+        self.activityInspector = AppActivityInspector()
         self.codexStatusBridge?.start()
         self.refreshPetLibrary()
         self.refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -1002,18 +1005,21 @@ final class VibestickViewModel: ObservableObject {
 
         let coderSource = coderSource
         let petResolver = petResolver
+        let activityInspector = activityInspector
         let status = latestStatus ?? Self.defaultPetStatus()
         coderRefreshTask = Task(priority: .utility) { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                let coders = coderSource.getStatuses(now: Date())
+                let now = Date()
+                let coders = coderSource.getStatuses(now: now)
                 let pet = petResolver.resolve(status: status, coders: coders)
-                return (coders, pet)
+                let activity = activityInspector.observe(now: now)
+                return (coders, pet, activity)
             }.value
 
             guard !Task.isCancelled else {
                 return
             }
-            self?.finishCoderRefresh(coders: result.0, pet: result.1)
+            self?.finishCoderRefresh(coders: result.0, pet: result.1, activity: result.2)
         }
     }
 
@@ -1063,14 +1069,55 @@ final class VibestickViewModel: ObservableObject {
         refreshCoderPet()
     }
 
-    private func finishCoderRefresh(coders: [CoderAgentStatus], pet: PetState) {
+    private func finishCoderRefresh(coders: [CoderAgentStatus], pet: PetState, activity: AppActivityObservation) {
         coderRefreshTask = nil
         activeTaskCount = coders.filter { Self.isMenuActivePhase($0.phase) }.count
-        petMood = pet.mood
-        petTitle = pet.title
-        petMessage = pet.message
+        activityObservation = activity
+        let display = Self.petDisplayState(pet: pet, coders: coders, activity: activity)
+        petMood = display.mood
+        petTitle = display.title
+        petMessage = display.message
         petCoders = Array(coders.prefix(3))
         menuStateDidChange?()
+    }
+
+    static func petDisplayState(
+        pet: PetState,
+        coders: [CoderAgentStatus],
+        activity: AppActivityObservation
+    ) -> (mood: String, title: String, message: String) {
+        guard canApplyActivityOverlay(pet: pet, coders: coders) else {
+            return (pet.mood, pet.title, pet.message)
+        }
+
+        let appLabel = activity.browserTitle ?? activity.appName ?? "当前 App"
+        switch activity.category {
+        case .study:
+            return ("happy", "学习中", "\(appLabel) 让猫咪很开心。")
+        case .distraction:
+            return ("sad", "摆烂预警", "\(appLabel) 让猫咪有点难过。")
+        case .neutral:
+            return (pet.mood, pet.title, pet.message)
+        }
+    }
+
+    static func canApplyActivityOverlay(pet: PetState, coders: [CoderAgentStatus]) -> Bool {
+        if ["error", "waiting", "success", "low_battery", "power"].contains(pet.mood) {
+            return false
+        }
+
+        if coders.contains(where: { status in
+            switch status.phase {
+            case .waitingAuthorization, .error, .success:
+                true
+            case .idle, .sleeping, .running, .reasoning, .toolCalling, .offline, .unknown:
+                false
+            }
+        }) {
+            return false
+        }
+
+        return ["idle", "sleeping", "running", "reasoning", "tool_calling"].contains(pet.mood)
     }
 
     func runDoctor() {

@@ -34,6 +34,7 @@ let coderSource = CompositeCoderStatusSource([
 ])
 let coderWriter = CoderStatusWriter(directory: coderDirectory)
 let petResolver = PetStateResolver()
+let activityInspector = AppActivityInspector()
 let deviceWatcherInstaller = MacDeviceWatcherInstaller(
     paths: .resolvedDefault(appPath: option("--app-path")),
     runner: runner)
@@ -89,6 +90,9 @@ func run() throws -> Int32 {
     case "coder":
         return try runCoder()
 
+    case "activity":
+        return try runActivity()
+
     case "device-watcher":
         return try runDeviceWatcher()
 
@@ -124,6 +128,20 @@ func runPet() throws -> Int32 {
         print("Title:     \(pet.title)")
         print("Message:   \(pet.message)")
         print("Coders:    \(pet.coders.isEmpty ? "-" : pet.coders.map { "\($0.agent):\($0.phase.rawValue)" }.joined(separator: ", "))")
+    }
+    return 0
+}
+
+func runActivity() throws -> Int32 {
+    guard args.count >= 2, args[1].lowercased() == "status" else {
+        throw ValidationError("Missing activity command. Expected: activity status [--json].")
+    }
+
+    let observation = activityInspector.observe()
+    if json {
+        writeJSON(ActivityStatusResponse(ok: true, observation: observation))
+    } else {
+        printActivityStatus(observation)
     }
     return 0
 }
@@ -248,6 +266,22 @@ func printDeviceWatcherResult(_ result: DeviceWatcherInstallResult) {
     print("LaunchAgent: \(result.plistPath)")
 }
 
+func printActivityStatus(_ observation: AppActivityObservation) {
+    print("Vibestick activity")
+    print("Category:         \(observation.category.rawValue)")
+    print("App:              \(observation.appName ?? "-")")
+    print("Bundle:           \(observation.bundleIdentifier ?? "-")")
+    print("PID:              \(observation.processId.map(String.init) ?? "-")")
+    print("Browser title:    \(observation.browserTitle ?? "-")")
+    print("Browser URL:      \(observation.browserURL ?? "-")")
+    print("Rule:             \(observation.matchedRuleId ?? "-")")
+    print("Matched field:    \(observation.matchedField ?? "-")")
+    print("Matched value:    \(observation.matchedValue ?? "-")")
+    for diagnostic in observation.diagnostics {
+        print("Diagnostic: \(diagnostic)")
+    }
+}
+
 func printHelp() {
     print("""
     Vibestick Mac
@@ -260,6 +294,7 @@ func printHelp() {
       vibestickctl pet status [--json] [--status-dir <path>] [--codex-sessions-dir <path>]
       vibestickctl coder emit --phase <phase> [--agent <name>] [--message <text>] [--workspace <path>] [--pid <id>] [--ttl <seconds>] [--session-id <id>] [--summary <text>] [--detail <text>] [--source-path <path>] [--json] [--status-dir <path>]
       vibestickctl coder clear [--agent <name>] [--json] [--status-dir <path>]
+      vibestickctl activity status [--json]
       vibestickctl device-watcher status [--json] [--app-path <path>]
       vibestickctl device-watcher install [--json] [--app-path <path>]
       vibestickctl device-watcher uninstall [--json] [--app-path <path>]
@@ -330,4 +365,9 @@ struct CoderClearResponse: Encodable {
     let ok: Bool
     let deleted: Int
     let statusDirectory: String
+}
+
+struct ActivityStatusResponse: Encodable {
+    let ok: Bool
+    let observation: AppActivityObservation
 }
