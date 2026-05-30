@@ -4,6 +4,44 @@ import XCTest
 
 @MainActor
 final class MacPetSpriteAnimatorTests: XCTestCase {
+    func testActionFrequencySettingsClampToSupportedRange() {
+        let settings = MacPetActionFrequencySettings(
+            randomActionFrequency: 0.1,
+            walkSpeedMultiplier: 1.04,
+            wanderFrequency: 2.8).clamped
+
+        XCTAssertEqual(settings.randomActionFrequency, 0.5)
+        XCTAssertEqual(settings.walkSpeedMultiplier, 1.0)
+        XCTAssertEqual(settings.wanderFrequency, 2.0)
+    }
+
+    func testActionFrequencySettingsScaleBehaviorIntervals() {
+        let settings = MacPetActionFrequencySettings(
+            randomActionFrequency: 2.0,
+            walkSpeedMultiplier: 1.5,
+            wanderFrequency: 0.5)
+
+        XCTAssertEqual(settings.scaledRandomActionDelay(8), 4)
+        XCTAssertEqual(settings.scaledWalkSpeed(60), 90)
+        XCTAssertEqual(settings.scaledWanderInterval(4), 8)
+        XCTAssertEqual(settings.randomActionDelayRange(active: true).lowerBound, 4)
+        XCTAssertEqual(settings.randomActionDelayRange(active: true).upperBound, 9)
+    }
+
+    func testActionFrequencySettingsPersistToDefaults() throws {
+        let suiteName = "MacPetActionFrequencySettingsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = MacPetActionFrequencySettings(
+            randomActionFrequency: 1.6,
+            walkSpeedMultiplier: 0.7,
+            wanderFrequency: 1.3)
+        settings.save(defaults: defaults)
+
+        XCTAssertEqual(MacPetActionFrequencySettings.load(defaults: defaults), settings.clamped)
+    }
+
     func testInitialIdleUsesSleepyNapClip() {
         let animator = MacPetSpriteAnimator()
 
@@ -208,6 +246,7 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         }
         return rows
     }
+
 }
 
 final class MacPetWalkGeometryTests: XCTestCase {
@@ -231,5 +270,64 @@ final class MacPetWalkGeometryTests: XCTestCase {
 
         XCTAssertEqual(bounds.minX, 100)
         XCTAssertEqual(bounds.maxX, 800)
+    }
+
+    func testWalkBoundsUseScaledPanelWidth() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let scaledWidth = MacPetResizeGeometry.scaledSize(
+            baseSize: CGSize(width: 356, height: 476),
+            scale: 1.25).width
+        let bounds = MacPetWalkGeometry.walkBounds(
+            visibleFrame: visibleFrame,
+            panelWidth: scaledWidth,
+            spriteLaneWidth: 220)
+
+        XCTAssertEqual(bounds.minX, -112.5)
+        XCTAssertEqual(bounds.maxX, 667.5)
+    }
+}
+
+final class MacPetResizeGeometryTests: XCTestCase {
+    func testClampedScaleUsesWindowsRange() {
+        XCTAssertEqual(MacPetResizeGeometry.clampedScale(0.1), 0.35)
+        XCTAssertEqual(MacPetResizeGeometry.clampedScale(1.0), 1.0)
+        XCTAssertEqual(MacPetResizeGeometry.clampedScale(2.0), 1.5)
+    }
+
+    func testScaleFromDragUsesDominantAxisAndWindowsDivisor() {
+        XCTAssertEqual(
+            MacPetResizeGeometry.scale(startScale: 1.0, dragDelta: NSPoint(x: 22, y: 10)),
+            1.1,
+            accuracy: 0.0001)
+        XCTAssertEqual(
+            MacPetResizeGeometry.scale(startScale: 1.0, dragDelta: NSPoint(x: 20, y: -44)),
+            0.8,
+            accuracy: 0.0001)
+    }
+
+    func testScaledSizeUsesClampedScale() {
+        let size = MacPetResizeGeometry.scaledSize(
+            baseSize: CGSize(width: 356, height: 476),
+            scale: 2.0)
+
+        XCTAssertEqual(size.width, 534)
+        XCTAssertEqual(size.height, 714)
+    }
+
+    func testResizeHitAcceptsSpriteLowerHalfWithPadding() {
+        let spriteFrame = NSRect(x: 68, y: 10, width: 220, height: 210)
+
+        XCTAssertTrue(MacPetResizeGeometry.isResizeHit(
+            point: NSPoint(x: 60, y: 105),
+            spriteFrame: spriteFrame))
+        XCTAssertTrue(MacPetResizeGeometry.isResizeHit(
+            point: NSPoint(x: 288, y: 220),
+            spriteFrame: spriteFrame))
+        XCTAssertFalse(MacPetResizeGeometry.isResizeHit(
+            point: NSPoint(x: 178, y: 90),
+            spriteFrame: spriteFrame))
+        XCTAssertFalse(MacPetResizeGeometry.isResizeHit(
+            point: NSPoint(x: 310, y: 130),
+            spriteFrame: spriteFrame))
     }
 }

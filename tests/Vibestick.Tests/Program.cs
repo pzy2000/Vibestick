@@ -55,6 +55,7 @@ internal static class Program
             ("Desktop pet e2e reflects state and bottom walking lane", TestDesktopPetE2EAsync),
             ("Desktop pet walks along bottom lane", TestDesktopPetWalksAlongBottomLaneAsync),
             ("Desktop pet can start with walking paused", TestDesktopPetWalkingPausedE2EAsync),
+            ("Desktop pet applies action frequency settings", TestDesktopPetActionFrequencySettingsE2EAsync),
             ("Desktop pet reports full sprite catalog and seeded random actions", TestDesktopPetSpriteCatalogAndRandomActionsE2EAsync),
             ("Desktop pet e2e renders collapsed multi-session cards", TestDesktopPetMultiSessionE2EAsync)
         };
@@ -1070,6 +1071,9 @@ internal static class Program
             var buttons = layout["Buttons"]?.AsArray() ??
                 throw new InvalidOperationException("Expected control panel button layout entries.");
             AssertEqual(9, buttons.Count);
+            var sliders = layout["Sliders"]?.AsArray() ??
+                throw new InvalidOperationException("Expected control panel slider layout entries.");
+            AssertEqual(3, sliders.Count);
 
             foreach (var action in new[]
             {
@@ -1085,6 +1089,11 @@ internal static class Program
             })
             {
                 AssertPanelActionVisible(buttons, action);
+            }
+
+            foreach (var slider in new[] { "Random actions", "Walking speed", "Wander / pause" })
+            {
+                AssertPanelSliderVisible(sliders, slider);
             }
         }
         finally
@@ -1395,6 +1404,64 @@ internal static class Program
             AssertEqual(false, second["walking"]?["enabled"]?.GetValue<bool>());
             var secondLeft = second["left"]?.GetValue<double>() ?? throw new InvalidOperationException("Snapshot missing left.");
             AssertNear(firstLeft, secondLeft, 1.5, "paused pet left");
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task TestDesktopPetActionFrequencySettingsE2EAsync()
+    {
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), $"vibestick-e2e-frequency-{Guid.NewGuid():N}");
+        var publishDirectory = Path.Combine(directory, "publish");
+        var placementPath = Path.Combine(directory, "pet-window.json");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+                placementPath,
+                """
+                {
+                  "Left": 120,
+                  "Top": 120,
+                  "Scale": 1.0,
+                  "WalkingEnabled": false,
+                  "RandomActionFrequency": 1.6,
+                  "WalkSpeedMultiplier": 0.7,
+                  "WanderFrequency": 1.3
+                }
+                """)
+            .ConfigureAwait(false);
+        await new CoderStatusWriter(directory)
+            .EmitAsync("codex", CoderAgentPhase.Idle, "idle", ttlSeconds: 60)
+            .ConfigureAwait(false);
+
+        var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetDotnetPath(),
+            Arguments = $"\"{guiDll}\" --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\"",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Failed to start Vibestick GUI.");
+
+        try
+        {
+            var snapshot = await WaitForPetSnapshotAnyAsync(directory, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            var frequency = snapshot["actionFrequency"] ??
+                throw new InvalidOperationException("Snapshot missing action frequency settings.");
+
+            AssertNear(1.6, frequency["randomActionFrequency"]?.GetValue<double>() ?? 0, 0.001, "random action frequency");
+            AssertNear(0.7, frequency["walkSpeedMultiplier"]?.GetValue<double>() ?? 0, 0.001, "walk speed multiplier");
+            AssertNear(1.3, frequency["wanderFrequency"]?.GetValue<double>() ?? 0, 0.001, "wander frequency");
         }
         finally
         {
@@ -2048,6 +2115,23 @@ internal static class Program
         {
             throw new InvalidOperationException($"Expected control panel action '{text}' to be at least 30px tall: {button.ToJsonString()}");
         }
+    }
+
+    private static void AssertPanelSliderVisible(JsonArray sliders, string label)
+    {
+        var slider = sliders.FirstOrDefault(node => node?["Label"]?.GetValue<string>() == label) ??
+            throw new InvalidOperationException($"Expected control panel slider '{label}'.");
+        if (slider["IsVisible"]?.GetValue<bool>() != true)
+        {
+            throw new InvalidOperationException($"Expected control panel slider '{label}' to be visible: {slider.ToJsonString()}");
+        }
+
+        if (slider["FitsWithinWindow"]?.GetValue<bool>() != true)
+        {
+            throw new InvalidOperationException($"Expected control panel slider '{label}' to fit within the window: {slider.ToJsonString()}");
+        }
+
+        AssertNear(1.0, slider["Value"]?.GetValue<double>() ?? 0, 0.001, $"{label} default value");
     }
 
     private static void AssertNearBottomRight(JsonNode snapshot)

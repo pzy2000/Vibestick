@@ -76,12 +76,15 @@ final class MacPetSpriteAnimator {
     private var isHovering = false
     private var activeClip: PetAnimationClip
     private var randomActionClip: PetAnimationClip?
-    private var nextRandomActionAt = Date().addingTimeInterval(6)
+    private var nextRandomActionAt = Date.distantFuture
+    private var actionFrequencySettings: MacPetActionFrequencySettings
     private var frameIndex = 0
     private var lastFrameAdvanceAt = Date()
 
-    init() {
+    init(actionFrequencySettings: MacPetActionFrequencySettings = .load()) {
+        self.actionFrequencySettings = actionFrequencySettings.clamped
         activeClip = Self.clips["sleepy_nap"]!
+        scheduleRandomAction()
     }
 
     var frame: MacPetSpriteFrameSnapshot {
@@ -139,6 +142,18 @@ final class MacPetSpriteAnimator {
             randomActionClip = nil
         }
         return selectClip(forceReset: true)
+    }
+
+    @discardableResult
+    func setActionFrequencySettings(_ settings: MacPetActionFrequencySettings) -> Bool {
+        let next = settings.clamped
+        guard actionFrequencySettings != next else {
+            return false
+        }
+
+        actionFrequencySettings = next
+        scheduleRandomAction()
+        return true
     }
 
     @discardableResult
@@ -229,7 +244,7 @@ final class MacPetSpriteAnimator {
             return
         }
         let active = ["running", "reasoning"].contains(mood)
-        nextRandomActionAt = Date().addingTimeInterval(Double.random(in: active ? 8...18 : 6...14))
+        nextRandomActionAt = Date().addingTimeInterval(Double.random(in: actionFrequencySettings.randomActionDelayRange(active: active)))
     }
 
     private func canUseRandomActions(_ mood: String) -> Bool {

@@ -61,6 +61,77 @@ private enum PetFocusPreference: String {
     }
 }
 
+struct MacPetActionFrequencySettings: Equatable {
+    static let minMultiplier: Double = 0.5
+    static let maxMultiplier: Double = 2.0
+    static let step: Double = 0.1
+    static let defaultValue = MacPetActionFrequencySettings(
+        randomActionFrequency: 1,
+        walkSpeedMultiplier: 1,
+        wanderFrequency: 1)
+
+    static let randomActionFrequencyDefaultsKey = "VibestickPetRandomActionFrequency"
+    static let walkSpeedMultiplierDefaultsKey = "VibestickPetWalkSpeedMultiplier"
+    static let wanderFrequencyDefaultsKey = "VibestickPetWanderFrequency"
+
+    var randomActionFrequency: Double
+    var walkSpeedMultiplier: Double
+    var wanderFrequency: Double
+
+    var clamped: MacPetActionFrequencySettings {
+        MacPetActionFrequencySettings(
+            randomActionFrequency: Self.clamp(randomActionFrequency),
+            walkSpeedMultiplier: Self.clamp(walkSpeedMultiplier),
+            wanderFrequency: Self.clamp(wanderFrequency))
+    }
+
+    static func load(defaults: UserDefaults = .standard) -> MacPetActionFrequencySettings {
+        MacPetActionFrequencySettings(
+            randomActionFrequency: loadMultiplier(forKey: randomActionFrequencyDefaultsKey, defaults: defaults),
+            walkSpeedMultiplier: loadMultiplier(forKey: walkSpeedMultiplierDefaultsKey, defaults: defaults),
+            wanderFrequency: loadMultiplier(forKey: wanderFrequencyDefaultsKey, defaults: defaults)).clamped
+    }
+
+    func save(defaults: UserDefaults = .standard) {
+        let settings = clamped
+        defaults.set(settings.randomActionFrequency, forKey: Self.randomActionFrequencyDefaultsKey)
+        defaults.set(settings.walkSpeedMultiplier, forKey: Self.walkSpeedMultiplierDefaultsKey)
+        defaults.set(settings.wanderFrequency, forKey: Self.wanderFrequencyDefaultsKey)
+    }
+
+    func randomActionDelayRange(active: Bool) -> ClosedRange<TimeInterval> {
+        let baseRange: ClosedRange<TimeInterval> = active ? 8...18 : 6...14
+        return scaledRandomActionDelay(baseRange.lowerBound)...scaledRandomActionDelay(baseRange.upperBound)
+    }
+
+    func scaledRandomActionDelay(_ delay: TimeInterval) -> TimeInterval {
+        max(0.1, delay / Self.clamp(randomActionFrequency))
+    }
+
+    func scaledWalkSpeed(_ speed: CGFloat) -> CGFloat {
+        speed * CGFloat(Self.clamp(walkSpeedMultiplier))
+    }
+
+    func scaledWanderInterval(_ interval: TimeInterval) -> TimeInterval {
+        max(0.1, interval / Self.clamp(wanderFrequency))
+    }
+
+    static func clamp(_ value: Double) -> Double {
+        guard value.isFinite else {
+            return 1
+        }
+        let snapped = (value / step).rounded() * step
+        return min(max(snapped, minMultiplier), maxMultiplier)
+    }
+
+    private static func loadMultiplier(forKey key: String, defaults: UserDefaults) -> Double {
+        guard let value = defaults.object(forKey: key) as? NSNumber else {
+            return 1
+        }
+        return value.doubleValue
+    }
+}
+
 private struct PetFocusContext {
     let petFrame: NSRect?
     let petVisible: Bool
@@ -270,6 +341,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewModel.petLibraryChanged = { [weak self] in
             self?.petWindow?.reloadPetSprite()
             self?.updateStatusItemState()
+        }
+        viewModel.petActionFrequencyChanged = { [weak self] settings in
+            self?.petWindow?.applyActionFrequencySettings(settings)
         }
         setupStatusItem()
         screenParametersObserver = NotificationCenter.default.addObserver(
@@ -655,8 +729,10 @@ final class VibestickViewModel: ObservableObject {
     @Published var deviceWatcherStatusText = "正在读取插盘自启状态..."
     @Published var deviceWatcherMessage = ""
     @Published var isInstallingDeviceWatcher = false
+    @Published var petActionFrequencySettings = MacPetActionFrequencySettings.load()
     var menuStateDidChange: (() -> Void)?
     var petLibraryChanged: (() -> Void)?
+    var petActionFrequencyChanged: ((MacPetActionFrequencySettings) -> Void)?
     private(set) var activeTaskCount = 0
 
     private let assertionManager: MacSleepAssertionManager
@@ -762,6 +838,38 @@ final class VibestickViewModel: ObservableObject {
             petLibraryMessage = friendlyError(error.localizedDescription)
             refreshPetLibrary()
         }
+    }
+
+    func setRandomActionFrequency(_ value: Double) {
+        updatePetActionFrequencySettings {
+            $0.randomActionFrequency = value
+        }
+    }
+
+    func setWalkSpeedMultiplier(_ value: Double) {
+        updatePetActionFrequencySettings {
+            $0.walkSpeedMultiplier = value
+        }
+    }
+
+    func setWanderFrequency(_ value: Double) {
+        updatePetActionFrequencySettings {
+            $0.wanderFrequency = value
+        }
+    }
+
+    private func updatePetActionFrequencySettings(_ update: (inout MacPetActionFrequencySettings) -> Void) {
+        var settings = petActionFrequencySettings
+        update(&settings)
+        settings = settings.clamped
+        guard settings != petActionFrequencySettings else {
+            return
+        }
+
+        petActionFrequencySettings = settings
+        settings.save()
+        petActionFrequencyChanged?(settings)
+        menuStateDidChange?()
     }
 
     func importPetFromDialog() {
@@ -1340,6 +1448,26 @@ struct ControlPanelView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 10) {
+                Text("宠物动作频率")
+                    .font(.headline)
+                PetFrequencySlider(
+                    title: "随机动作频率",
+                    value: Binding(
+                        get: { viewModel.petActionFrequencySettings.randomActionFrequency },
+                        set: { viewModel.setRandomActionFrequency($0) }))
+                PetFrequencySlider(
+                    title: "行走速度",
+                    value: Binding(
+                        get: { viewModel.petActionFrequencySettings.walkSpeedMultiplier },
+                        set: { viewModel.setWalkSpeedMultiplier($0) }))
+                PetFrequencySlider(
+                    title: "游荡/停顿频率",
+                    value: Binding(
+                        get: { viewModel.petActionFrequencySettings.wanderFrequency },
+                        set: { viewModel.setWanderFrequency($0) }))
+            }
+
             ScrollView {
                 Text(viewModel.doctorText)
                     .font(.system(.caption, design: .monospaced))
@@ -1348,6 +1476,29 @@ struct ControlPanelView: View {
         }
         .padding(18)
         .onAppear { viewModel.refresh() }
+    }
+}
+
+private struct PetFrequencySlider: View {
+    let title: String
+    @Binding var value: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(String(format: "%.1fx", value))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(
+                value: $value,
+                in: MacPetActionFrequencySettings.minMultiplier...MacPetActionFrequencySettings.maxMultiplier,
+                step: MacPetActionFrequencySettings.step)
+        }
     }
 }
 
@@ -1392,10 +1543,16 @@ private enum PetCardDisplayMode: String {
 private final class PetPanelState: ObservableObject {
     @Published var cardDisplayMode: PetCardDisplayMode
     @Published var isPresenceReduced: Bool
+    @Published var scale: CGFloat
 
-    init(cardDisplayMode: PetCardDisplayMode, isPresenceReduced: Bool = false) {
+    init(
+        cardDisplayMode: PetCardDisplayMode,
+        isPresenceReduced: Bool = false,
+        scale: CGFloat = MacPetResizeGeometry.defaultScale)
+    {
         self.cardDisplayMode = cardDisplayMode
         self.isPresenceReduced = isPresenceReduced
+        self.scale = MacPetResizeGeometry.clampedScale(scale)
     }
 }
 
@@ -1419,6 +1576,50 @@ enum MacPetWalkGeometry {
     }
 }
 
+enum MacPetResizeGeometry {
+    static let defaultScale: CGFloat = 1.0
+    static let minScale: CGFloat = 0.35
+    static let maxScale: CGFloat = 1.5
+    static let dragDivisor: CGFloat = 220
+    static let hitPadding: CGFloat = 16
+    static let hitSpriteYRatio: CGFloat = 0.45
+    static let basePanelSize = CGSize(width: 356, height: 476)
+    static let baseSpriteLaneSize = CGSize(width: MacPetWalkGeometry.spriteLaneWidth, height: 210)
+
+    static func clampedScale(_ scale: CGFloat) -> CGFloat {
+        guard scale.isFinite else {
+            return defaultScale
+        }
+        return min(max(scale, minScale), maxScale)
+    }
+
+    static func scale(startScale: CGFloat, dragDelta: NSPoint) -> CGFloat {
+        let dominantDelta = abs(dragDelta.x) >= abs(dragDelta.y) ? dragDelta.x : dragDelta.y
+        return clampedScale(startScale + dominantDelta / dragDivisor)
+    }
+
+    static func scaledSize(baseSize: CGSize, scale: CGFloat) -> CGSize {
+        let clamped = clampedScale(scale)
+        return CGSize(width: baseSize.width * clamped, height: baseSize.height * clamped)
+    }
+
+    static func spriteFrame(hostBounds: NSRect, scale: CGFloat) -> NSRect {
+        let size = scaledSize(baseSize: baseSpriteLaneSize, scale: scale)
+        return NSRect(
+            x: hostBounds.midX - size.width / 2,
+            y: hitPadding * clampedScale(scale),
+            width: size.width,
+            height: size.height)
+    }
+
+    static func isResizeHit(point: NSPoint, spriteFrame: NSRect) -> Bool {
+        point.x >= spriteFrame.minX - hitPadding &&
+            point.x <= spriteFrame.maxX + hitPadding &&
+            point.y >= spriteFrame.minY + spriteFrame.height * hitSpriteYRatio &&
+            point.y <= spriteFrame.maxY + hitPadding
+    }
+}
+
 @MainActor
 final class PetPanel: NSPanel, NSMenuDelegate {
     private static let walkingEnabledDefaultsKey = "VibestickPetWalkingEnabled"
@@ -1426,7 +1627,12 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private static let originYDefaultsKey = "VibestickPetWindowOriginY"
     private static let screenIdentifierDefaultsKey = "VibestickPetScreenIdentifier"
     private static let cardDisplayModeDefaultsKey = "VibestickPetCardDisplayMode"
-    private static let defaultFrame = NSRect(x: 120, y: 120, width: 356, height: 476)
+    private static let scaleDefaultsKey = "VibestickPetWindowScale"
+    private static let defaultFrame = NSRect(
+        x: 120,
+        y: 120,
+        width: MacPetResizeGeometry.basePanelSize.width,
+        height: MacPetResizeGeometry.basePanelSize.height)
 
     private let viewModel: VibestickViewModel
     private let openControlPanel: () -> Void
@@ -1440,7 +1646,9 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private let walkingToggleMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let cardDisplayModeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let focusModeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let panelState = PetPanelState(cardDisplayMode: PetPanel.loadCardDisplayMode())
+    private let panelState = PetPanelState(
+        cardDisplayMode: PetPanel.loadCardDisplayMode(),
+        scale: PetPanel.loadSavedScale())
     private let spriteAnimator = MacPetSpriteAnimator()
     private let spriteLayerView = MacPetSpriteLayerView()
     private var displayLink: MacPetDisplayLink?
@@ -1450,7 +1658,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var direction: MacPetCrawlDirection = .left
     private var manualDragDirection: MacPetCrawlDirection?
     private var walkingAnimationDirection: MacPetCrawlDirection?
-    private var currentWalkSpeed = PetPanel.randomWalkSpeed()
+    private var actionFrequencySettings = MacPetActionFrequencySettings.load()
+    private var currentWalkSpeed: CGFloat = 0
     private var crawlAnimationSuppressed = false
     private var walkingEnabled = PetPanel.loadWalkingEnabled()
     private var spriteHovering = false
@@ -1458,6 +1667,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     private var presenceMode: PetPresenceMode = .normal
     private var presenceSnapshot: PetPresenceSnapshot?
     private var manualInteractionDuringReduced = false
+    private var resizing = false
+    private var resizeStartScale = MacPetResizeGeometry.defaultScale
     private static let minimumWalkableWidth: CGFloat = 8
     private static let edgeTolerance: CGFloat = 2
     private static let reducedAlpha: CGFloat = 0.42
@@ -1485,11 +1696,13 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         self.cycleFocusPreference = cycleFocusPreference
         self.focusActionTitle = focusActionTitle
         self.menuStateDidChange = menuStateDidChange
+        self.actionFrequencySettings = viewModel.petActionFrequencySettings.clamped
         super.init(
             contentRect: Self.initialFrame(),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false)
+        currentWalkSpeed = randomWalkSpeed()
         let hosting = PetHostingView(rootView: PetView(
             viewModel: viewModel,
             panelState: panelState,
@@ -1518,6 +1731,24 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         hosting.onDragEnd = { [weak self] in
             self?.finishManualDrag()
         }
+        hosting.isResizeHit = { [weak self, weak hosting] point in
+            guard let self, let hosting else {
+                return false
+            }
+            let spriteFrame = MacPetResizeGeometry.spriteFrame(
+                hostBounds: hosting.bounds,
+                scale: self.petScale)
+            return MacPetResizeGeometry.isResizeHit(point: point, spriteFrame: spriteFrame)
+        }
+        hosting.onResizeStart = { [weak self] in
+            self?.beginResizing()
+        }
+        hosting.onResizeTo = { [weak self] delta in
+            self?.resize(byDragDelta: delta)
+        }
+        hosting.onResizeEnd = { [weak self] in
+            self?.finishResizing()
+        }
         contentView = hosting
         hosting.petContextMenu = buildContextMenu()
         isOpaque = false
@@ -1525,6 +1756,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         isMovableByWindowBackground = false
+        spriteAnimator.setActionFrequencySettings(actionFrequencySettings)
     }
 
     static var savedWalkingEnabled: Bool {
@@ -1541,6 +1773,14 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     var cardDisplayModeActionTitle: String {
         "任务卡：\(panelState.cardDisplayMode.menuLabel)"
+    }
+
+    var petScale: CGFloat {
+        panelState.scale
+    }
+
+    var petActionFrequencySettings: MacPetActionFrequencySettings {
+        actionFrequencySettings
     }
 
     var isPresenceReduced: Bool {
@@ -1621,8 +1861,26 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         updateFocusModeMenuText()
     }
 
+    func advanceWalkingForTesting(at now: Date) {
+        updateWalkPosition(at: now)
+        let frameChanged = spriteAnimator.advanceFrameIfDue(at: now)
+        updateSpritePresentation(at: now, force: frameChanged)
+    }
+
     func reloadPetSprite() {
         spriteLayerView.setSpritesheetURL(viewModel.currentPet.spritesheetURL)
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func applyActionFrequencySettings(_ settings: MacPetActionFrequencySettings) {
+        let next = settings.clamped
+        guard actionFrequencySettings != next else {
+            return
+        }
+
+        actionFrequencySettings = next
+        spriteAnimator.setActionFrequencySettings(next)
+        startNewWalkSegment(at: Date())
         updateSpritePresentation(at: Date(), force: true)
     }
 
@@ -1630,7 +1888,11 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         clearSavedPosition()
         pauseUntil = nil
         lastTick = nil
-        setFrameOrigin(Self.clampedFrame(Self.defaultFrame, preferredScreenIdentifier: nil).origin)
+        var next = Self.defaultFrame
+        next.size = MacPetResizeGeometry.scaledSize(
+            baseSize: MacPetResizeGeometry.basePanelSize,
+            scale: petScale)
+        setFrameOrigin(Self.clampedFrame(next, preferredScreenIdentifier: nil).origin)
 
         if presenceMode == .reduced {
             moveToReducedCorner()
@@ -1665,7 +1927,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func updateWalkPosition(at now: Date) {
-        guard walkingEnabled, presenceMode == .normal else {
+        guard walkingEnabled, presenceMode == .normal, !resizing else {
             pauseUntil = nil
             nextWanderAt = nil
             walkingAnimationDirection = nil
@@ -1769,6 +2031,33 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         updateSpritePresentation(at: Date(), force: true)
     }
 
+    func beginResizing() {
+        if presenceMode == .reduced {
+            manualInteractionDuringReduced = true
+        }
+        resizing = true
+        resizeStartScale = petScale
+        walkingAnimationDirection = nil
+        crawlAnimationSuppressed = true
+        pauseUntil = nil
+        lastTick = nil
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func resize(byDragDelta delta: NSPoint) {
+        let nextScale = MacPetResizeGeometry.scale(startScale: resizeStartScale, dragDelta: delta)
+        applyScale(nextScale)
+        clampCurrentPosition()
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
+    func finishResizing() {
+        resizing = false
+        crawlAnimationSuppressed = presenceMode == .reduced
+        saveCurrentPosition()
+        updateSpritePresentation(at: Date(), force: true)
+    }
+
     private func enterReducedPresence() {
         presenceSnapshot = PetPresenceSnapshot(frame: frame, retainedScreenIdentifier: retainedScreenIdentifier)
         manualInteractionDuringReduced = false
@@ -1861,8 +2150,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
     }
 
     private func startNewWalkSegment(at now: Date) {
-        currentWalkSpeed = Self.randomWalkSpeed()
-        nextWanderAt = now.addingTimeInterval(Self.randomWanderInterval())
+        currentWalkSpeed = randomWalkSpeed()
+        nextWanderAt = now.addingTimeInterval(randomWanderInterval())
     }
 
     private func shouldApplyWander(
@@ -1876,13 +2165,13 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
         let width = bounds.maxX - bounds.minX
         guard width >= 160 else {
-            self.nextWanderAt = now.addingTimeInterval(Self.randomWanderInterval())
+            self.nextWanderAt = now.addingTimeInterval(randomWanderInterval())
             return false
         }
 
         let margin = min(max(width * 0.15, 48), width / 2)
         guard originX > bounds.minX + margin, originX < bounds.maxX - margin else {
-            self.nextWanderAt = now.addingTimeInterval(Self.randomWanderInterval())
+            self.nextWanderAt = now.addingTimeInterval(randomWanderInterval())
             return false
         }
 
@@ -1908,16 +2197,16 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         }
     }
 
-    private static func randomWalkSpeed() -> CGFloat {
-        CGFloat(Double.random(in: 42...72))
+    private func randomWalkSpeed() -> CGFloat {
+        actionFrequencySettings.scaledWalkSpeed(CGFloat(Double.random(in: 42...72)))
     }
 
     private static func randomEdgePause() -> TimeInterval {
         Double.random(in: 0.15...0.45)
     }
 
-    private static func randomWanderInterval() -> TimeInterval {
-        Double.random(in: 2.5...6.5)
+    private func randomWanderInterval() -> TimeInterval {
+        actionFrequencySettings.scaledWanderInterval(Double.random(in: 2.5...6.5))
     }
 
     private static func randomWanderPause() -> TimeInterval {
@@ -1926,6 +2215,16 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     private func clampCurrentPosition() {
         setFrameOrigin(clampedOrigin(frame.origin))
+    }
+
+    private func applyScale(_ scale: CGFloat) {
+        let nextScale = MacPetResizeGeometry.clampedScale(scale)
+        panelState.scale = nextScale
+        var nextFrame = frame
+        nextFrame.size = MacPetResizeGeometry.scaledSize(
+            baseSize: MacPetResizeGeometry.basePanelSize,
+            scale: nextScale)
+        setFrame(Self.clampedFrame(nextFrame, preferredScreenIdentifier: retainedScreenIdentifier), display: true)
     }
 
     private func clampedOrigin(_ origin: NSPoint, preferRetainedScreen: Bool = true) -> NSPoint {
@@ -2093,8 +2392,18 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         return value.flatMap(PetCardDisplayMode.init(rawValue:)) ?? .full
     }
 
+    private static func loadSavedScale() -> CGFloat {
+        guard let value = UserDefaults.standard.object(forKey: scaleDefaultsKey) as? NSNumber else {
+            return MacPetResizeGeometry.defaultScale
+        }
+        return MacPetResizeGeometry.clampedScale(CGFloat(truncating: value))
+    }
+
     private static func initialFrame() -> NSRect {
         var frame = defaultFrame
+        frame.size = MacPetResizeGeometry.scaledSize(
+            baseSize: MacPetResizeGeometry.basePanelSize,
+            scale: loadSavedScale())
         let screenIdentifier = loadSavedScreenIdentifier()
         if let savedOrigin = loadSavedOrigin() {
             frame.origin = savedOrigin
@@ -2168,6 +2477,7 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         let defaults = UserDefaults.standard
         defaults.set(Double(frame.origin.x), forKey: Self.originXDefaultsKey)
         defaults.set(Double(frame.origin.y), forKey: Self.originYDefaultsKey)
+        defaults.set(Double(petScale), forKey: Self.scaleDefaultsKey)
         retainedScreenIdentifier = Self.screenIdentifier(for: Self.screen(containing: frame) ?? screen)
         if let retainedScreenIdentifier {
             defaults.set(retainedScreenIdentifier, forKey: Self.screenIdentifierDefaultsKey)
@@ -2224,6 +2534,10 @@ private final class PetHostingView: NSHostingView<PetView> {
     var onDragStart: (() -> Void)?
     var onDragTo: ((NSPoint, CGFloat) -> Void)?
     var onDragEnd: (() -> Void)?
+    var isResizeHit: ((NSPoint) -> Bool)?
+    var onResizeStart: (() -> Void)?
+    var onResizeTo: ((NSPoint) -> Void)?
+    var onResizeEnd: (() -> Void)?
 
     var petContextMenu: NSMenu? {
         didSet {
@@ -2287,6 +2601,8 @@ private final class PetHostingView: NSHostingView<PetView> {
 
         let startMouseLocation = NSEvent.mouseLocation
         let startWindowOrigin = window.frame.origin
+        let startViewLocation = convert(event.locationInWindow, from: nil)
+        let interaction: PetHostingPointerInteraction = isResizeHit?(startViewLocation) == true ? .resize : .move
         var lastMouseLocation = startMouseLocation
         var isDragging = false
 
@@ -2311,21 +2627,36 @@ private final class PetHostingView: NSHostingView<PetView> {
                 if !isDragging, distance >= dragThreshold {
                     isDragging = true
                     cancelPendingPrimaryClick()
-                    onDragStart?()
+                    switch interaction {
+                    case .move:
+                        onDragStart?()
+                    case .resize:
+                        onResizeStart?()
+                    }
                 }
 
                 if isDragging {
-                    onDragTo?(NSPoint(
-                        x: startWindowOrigin.x + delta.x,
-                        y: startWindowOrigin.y + delta.y),
-                        dragDeltaX)
+                    switch interaction {
+                    case .move:
+                        onDragTo?(NSPoint(
+                            x: startWindowOrigin.x + delta.x,
+                            y: startWindowOrigin.y + delta.y),
+                            dragDeltaX)
+                    case .resize:
+                        onResizeTo?(delta)
+                    }
                 }
                 lastMouseLocation = currentMouseLocation
                 continue
             }
 
             if isDragging {
-                onDragEnd?()
+                switch interaction {
+                case .move:
+                    onDragEnd?()
+                case .resize:
+                    onResizeEnd?()
+                }
             } else {
                 schedulePrimaryClick()
             }
@@ -2349,6 +2680,11 @@ private final class PetHostingView: NSHostingView<PetView> {
     }
 }
 
+private enum PetHostingPointerInteraction {
+    case move
+    case resize
+}
+
 private struct PetView: View {
     @ObservedObject var viewModel: VibestickViewModel
     @ObservedObject var panelState: PetPanelState
@@ -2369,6 +2705,19 @@ private struct PetView: View {
     }
 
     var body: some View {
+        let scaledSize = MacPetResizeGeometry.scaledSize(
+            baseSize: MacPetResizeGeometry.basePanelSize,
+            scale: panelState.scale)
+        content
+            .frame(
+                width: MacPetResizeGeometry.basePanelSize.width,
+                height: MacPetResizeGeometry.basePanelSize.height,
+                alignment: .center)
+            .scaleEffect(panelState.scale, anchor: .center)
+            .frame(width: scaledSize.width, height: scaledSize.height, alignment: .center)
+    }
+
+    private var content: some View {
         VStack(spacing: 8) {
             cardArea
             ZStack(alignment: .bottom) {

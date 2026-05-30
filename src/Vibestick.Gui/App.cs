@@ -39,6 +39,7 @@ public sealed class App : Application
     private Forms.NotifyIcon? _notifyIcon;
     private Forms.ToolStripMenuItem? _petToggleTrayMenuItem;
     private string? _placementPath;
+    private PetWindowStateStore? _petWindowStateStore;
     private string? _panelLayoutSnapshotPath;
     private Window? DialogOwner => _mainWindow is not null ? _mainWindow : _petWindow;
 
@@ -64,6 +65,7 @@ public sealed class App : Application
         var codexSessionsRoot = GetOption(_args, "--codex-sessions-dir") ??
             Environment.GetEnvironmentVariable("VIBESTICK_CODEX_SESSIONS_DIR");
         _placementPath = GetOption(_args, "--placement-path");
+        _petWindowStateStore = new PetWindowStateStore(_placementPath);
         _panelLayoutSnapshotPath = GetOption(_args, "--panel-layout-snapshot");
         _services = GuiServiceFactory.Create(
             statusDirectory,
@@ -124,7 +126,7 @@ public sealed class App : Application
             ImportPetFromDialog,
             ExportCurrentPetFromDialog,
             () => Shutdown(0),
-            new PetWindowStateStore(_placementPath));
+            _petWindowStateStore);
         _petWindow.Closed += (_, _) =>
         {
             _petWindow = null;
@@ -171,9 +173,20 @@ public sealed class App : Application
             return;
         }
 
-        _mainWindow = new MainWindow(_services, _runtimeState, OnPetLibraryChanged, _panelLayoutSnapshotPath);
+        _mainWindow = new MainWindow(
+            _services,
+            _runtimeState,
+            OnPetLibraryChanged,
+            _panelLayoutSnapshotPath,
+            _petWindowStateStore,
+            OnPetActionFrequencyChanged);
         _mainWindow.Closed += (_, _) => _mainWindow = null;
         _mainWindow.Show();
+    }
+
+    private void OnPetActionFrequencyChanged(PetActionFrequencySettings settings)
+    {
+        _petWindow?.SetActionFrequencySettings(settings);
     }
 
     private void CreateTrayIcon()
@@ -361,6 +374,8 @@ public sealed class MainWindow : Window
     private readonly GuiServices _services;
     private readonly GuiRuntimeState _runtimeState;
     private readonly Action _petLibraryChanged;
+    private readonly Action<PetActionFrequencySettings> _petActionFrequencyChanged;
+    private readonly PetWindowStateStore _petWindowStateStore;
     private readonly DispatcherTimer _hyperTimer;
     private IDisposable? _sleepBlock;
 
@@ -388,6 +403,12 @@ public sealed class MainWindow : Window
     private readonly Button _importPetButton = new();
     private readonly Button _exportPetButton = new();
     private readonly Button _deletePetButton = new();
+    private readonly Slider _randomActionFrequencySlider = new();
+    private readonly Slider _walkSpeedMultiplierSlider = new();
+    private readonly Slider _wanderFrequencySlider = new();
+    private readonly TextBlock _randomActionFrequencyValue = new();
+    private readonly TextBlock _walkSpeedMultiplierValue = new();
+    private readonly TextBlock _wanderFrequencyValue = new();
     private readonly DispatcherTimer _watchTimer;
     private VibestickStatus? _lastStatus;
     private DoctorReport? _lastDoctorReport;
@@ -396,16 +417,23 @@ public sealed class MainWindow : Window
     private DateTimeOffset? _lastSafetyCheckAt;
     private readonly string? _panelLayoutSnapshotPath;
     private bool _isRefreshingPetLibraryUi;
+    private bool _isRefreshingActionFrequencyUi;
+    private PetActionFrequencySettings _petActionFrequencySettings = PetActionFrequencySettings.Default;
 
     public MainWindow(
         GuiServices services,
         GuiRuntimeState runtimeState,
         Action? petLibraryChanged = null,
-        string? panelLayoutSnapshotPath = null)
+        string? panelLayoutSnapshotPath = null,
+        PetWindowStateStore? petWindowStateStore = null,
+        Action<PetActionFrequencySettings>? petActionFrequencyChanged = null)
     {
         _services = services;
         _runtimeState = runtimeState;
         _petLibraryChanged = petLibraryChanged ?? (() => { });
+        _petWindowStateStore = petWindowStateStore ?? new PetWindowStateStore();
+        _petActionFrequencyChanged = petActionFrequencyChanged ?? (_ => { });
+        _petActionFrequencySettings = _petWindowStateStore.LoadActionFrequencySettings();
         _panelLayoutSnapshotPath = panelLayoutSnapshotPath;
         _hyperTimer = new DispatcherTimer
         {
@@ -432,6 +460,7 @@ public sealed class MainWindow : Window
             _watchTimer.Start();
             await RefreshStatusAsync("Ready.").ConfigureAwait(true);
             RefreshPetLibraryUi();
+            RefreshActionFrequencyUi();
             await WritePanelLayoutSnapshotAsync().ConfigureAwait(true);
         };
         Closed += async (_, _) =>
@@ -630,6 +659,7 @@ public sealed class MainWindow : Window
         AddActionButton(actions, _exportPetButton, "Export Current", ExportCurrentPetAsync);
         AddActionButton(actions, _deletePetButton, "Delete Custom Pet", DeleteSelectedPetAsync);
         root.Children.Add(actions);
+        root.Children.Add(BuildPetActionFrequencyPanel());
 
         return new Border
         {
@@ -640,6 +670,124 @@ public sealed class MainWindow : Window
             CornerRadius = new CornerRadius(8),
             Child = root
         };
+    }
+
+    private UIElement BuildPetActionFrequencyPanel()
+    {
+        var root = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+        root.Children.Add(new TextBlock
+        {
+            Text = "Pet Action Frequency",
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brush("#172033"),
+            Margin = new Thickness(0, 0, 0, 8)
+        });
+
+        AddFrequencySlider(
+            root,
+            _randomActionFrequencySlider,
+            _randomActionFrequencyValue,
+            "Random actions",
+            _petActionFrequencySettings.RandomActionFrequency);
+        AddFrequencySlider(
+            root,
+            _walkSpeedMultiplierSlider,
+            _walkSpeedMultiplierValue,
+            "Walking speed",
+            _petActionFrequencySettings.WalkSpeedMultiplier);
+        AddFrequencySlider(
+            root,
+            _wanderFrequencySlider,
+            _wanderFrequencyValue,
+            "Wander / pause",
+            _petActionFrequencySettings.WanderFrequency);
+
+        return root;
+    }
+
+    private void AddFrequencySlider(
+        Panel root,
+        Slider slider,
+        TextBlock valueText,
+        string label,
+        double value)
+    {
+        var row = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+        var header = new DockPanel { LastChildFill = true };
+        valueText.FontSize = 11;
+        valueText.FontFamily = new FontFamily("Consolas");
+        valueText.Foreground = Brush("#4b5563");
+        DockPanel.SetDock(valueText, Dock.Right);
+        header.Children.Add(valueText);
+        header.Children.Add(new TextBlock
+        {
+            Text = label,
+            FontSize = 11,
+            Foreground = Brush("#4b5563")
+        });
+        row.Children.Add(header);
+
+        slider.Minimum = PetActionFrequencySettings.MinMultiplier;
+        slider.Maximum = PetActionFrequencySettings.MaxMultiplier;
+        slider.TickFrequency = PetActionFrequencySettings.Step;
+        slider.SmallChange = PetActionFrequencySettings.Step;
+        slider.LargeChange = PetActionFrequencySettings.Step * 5;
+        slider.IsSnapToTickEnabled = true;
+        slider.AutoToolTipPlacement = AutoToolTipPlacement.TopLeft;
+        slider.Value = value;
+        slider.ValueChanged += (_, _) => HandleActionFrequencySliderChanged();
+        row.Children.Add(slider);
+        root.Children.Add(row);
+        UpdateFrequencyValueText(valueText, value);
+    }
+
+    private void RefreshActionFrequencyUi()
+    {
+        _isRefreshingActionFrequencyUi = true;
+        try
+        {
+            _petActionFrequencySettings = _petWindowStateStore.LoadActionFrequencySettings();
+            _randomActionFrequencySlider.Value = _petActionFrequencySettings.RandomActionFrequency;
+            _walkSpeedMultiplierSlider.Value = _petActionFrequencySettings.WalkSpeedMultiplier;
+            _wanderFrequencySlider.Value = _petActionFrequencySettings.WanderFrequency;
+            UpdateActionFrequencyValueText();
+        }
+        finally
+        {
+            _isRefreshingActionFrequencyUi = false;
+        }
+    }
+
+    private void HandleActionFrequencySliderChanged()
+    {
+        if (_isRefreshingActionFrequencyUi)
+        {
+            return;
+        }
+
+        var settings = new PetActionFrequencySettings
+        {
+            RandomActionFrequency = _randomActionFrequencySlider.Value,
+            WalkSpeedMultiplier = _walkSpeedMultiplierSlider.Value,
+            WanderFrequency = _wanderFrequencySlider.Value
+        }.Clamped();
+        _petActionFrequencySettings = settings;
+        _petWindowStateStore.SaveActionFrequencySettings(settings);
+        _petActionFrequencyChanged(settings);
+        RefreshActionFrequencyUi();
+    }
+
+    private void UpdateActionFrequencyValueText()
+    {
+        UpdateFrequencyValueText(_randomActionFrequencyValue, _petActionFrequencySettings.RandomActionFrequency);
+        UpdateFrequencyValueText(_walkSpeedMultiplierValue, _petActionFrequencySettings.WalkSpeedMultiplier);
+        UpdateFrequencyValueText(_wanderFrequencyValue, _petActionFrequencySettings.WanderFrequency);
+    }
+
+    private static void UpdateFrequencyValueText(TextBlock valueText, double value)
+    {
+        valueText.Text = $"{PetActionFrequencySettings.ClampMultiplier(value):0.0}x";
     }
 
     public void RefreshPetLibraryUi()
@@ -962,6 +1110,12 @@ public sealed class MainWindow : Window
                 CaptureButtonLayout(_importPetButton),
                 CaptureButtonLayout(_exportPetButton),
                 CaptureButtonLayout(_deletePetButton)
+            },
+            new[]
+            {
+                CaptureSliderLayout(_randomActionFrequencySlider, "Random actions"),
+                CaptureSliderLayout(_walkSpeedMultiplierSlider, "Walking speed"),
+                CaptureSliderLayout(_wanderFrequencySlider, "Wander / pause")
             });
 
         var directory = Path.GetDirectoryName(_panelLayoutSnapshotPath);
@@ -1005,6 +1159,35 @@ public sealed class MainWindow : Window
             bounds.Top,
             bounds.Right,
             bounds.Bottom,
+            fitsWithinWindow);
+    }
+
+    private SliderLayoutSnapshot CaptureSliderLayout(Slider slider, string label)
+    {
+        var contentRoot = Content as FrameworkElement;
+        var bounds = contentRoot is not null
+            ? slider.TransformToAncestor(contentRoot).TransformBounds(
+                new Rect(0, 0, slider.ActualWidth, slider.ActualHeight))
+            : slider.TransformToAncestor(this).TransformBounds(
+                new Rect(0, 0, slider.ActualWidth, slider.ActualHeight));
+        var clientBounds = contentRoot is not null
+            ? new Rect(0, 0, contentRoot.ActualWidth, contentRoot.ActualHeight)
+            : new Rect(0, 0, ActualWidth, ActualHeight);
+        var fitsWithinWindow =
+            slider.IsVisible &&
+            slider.ActualWidth > 0 &&
+            slider.ActualHeight > 0 &&
+            bounds.Left >= clientBounds.Left &&
+            bounds.Top >= clientBounds.Top &&
+            bounds.Right <= clientBounds.Right &&
+            bounds.Bottom <= clientBounds.Bottom;
+
+        return new SliderLayoutSnapshot(
+            label,
+            slider.IsVisible,
+            slider.ActualWidth,
+            slider.ActualHeight,
+            slider.Value,
             fitsWithinWindow);
     }
 
@@ -1390,7 +1573,8 @@ public sealed class MainWindow : Window
         double RequestedHeight,
         double ActualWidth,
         double ActualHeight,
-        IReadOnlyList<ButtonLayoutSnapshot> Buttons);
+        IReadOnlyList<ButtonLayoutSnapshot> Buttons,
+        IReadOnlyList<SliderLayoutSnapshot> Sliders);
 
     private sealed record ButtonLayoutSnapshot(
         string Text,
@@ -1401,6 +1585,14 @@ public sealed class MainWindow : Window
         double Top,
         double Right,
         double Bottom,
+        bool FitsWithinWindow);
+
+    private sealed record SliderLayoutSnapshot(
+        string Label,
+        bool IsVisible,
+        double Width,
+        double Height,
+        double Value,
         bool FitsWithinWindow);
 
     private sealed record PetSelectorItem(string Id, string Label);

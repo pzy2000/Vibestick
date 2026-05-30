@@ -114,6 +114,7 @@ public sealed class PetWindow : Window
     private int _lastTaskCardsHidden;
     private bool _walkingEnabled = true;
     private bool _walkTemporarilyPaused;
+    private PetActionFrequencySettings _actionFrequencySettings = PetActionFrequencySettings.Default;
     private PetSpriteCrawlDirection _walkDirection = PetSpriteCrawlDirection.Left;
     private DateTimeOffset? _lastWalkTickUtc;
     private DateTimeOffset? _walkPauseUntilUtc;
@@ -285,6 +286,23 @@ public sealed class PetWindow : Window
             Array.Empty<CoderAgentStatus>(),
             _runtimeState.IsHyperGuardRunning,
             DateTimeOffset.UtcNow));
+    }
+
+    public void SetActionFrequencySettings(PetActionFrequencySettings settings)
+    {
+        var clamped = settings.Clamped();
+        if (_actionFrequencySettings == clamped)
+        {
+            return;
+        }
+
+        _actionFrequencySettings = clamped;
+        _spriteAnimator.SetActionFrequencySettings(clamped);
+        _walkedSincePause = TimeSpan.Zero;
+        _walkPauseUntilUtc = null;
+        SyncFrameTimerInterval();
+        SavePlacement();
+        WriteRuntimeSnapshotIfReady(DateTimeOffset.UtcNow, force: true);
     }
 
     private UIElement BuildLayout(Image sprite, TextBlock fallback)
@@ -901,8 +919,18 @@ public sealed class PetWindow : Window
         {
             ApplyScale(saved.Scale ?? DefaultScale);
             _walkingEnabled = saved.WalkingEnabled ?? true;
-            Left = Clamp(saved.Left, SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width);
-            Top = Clamp(saved.Top, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height);
+            _actionFrequencySettings = saved.ActionFrequencySettings;
+            _spriteAnimator.SetActionFrequencySettings(_actionFrequencySettings);
+            if (saved.HasWindowPosition)
+            {
+                Left = Clamp(saved.Left!.Value, SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width);
+                Top = Clamp(saved.Top!.Value, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height);
+            }
+            else
+            {
+                Left = SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - Width - DefaultMargin;
+                Top = SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - Height - DefaultMargin;
+            }
             AlignToWalkLane();
             UpdateWalkingMenuText();
             return;
@@ -917,7 +945,14 @@ public sealed class PetWindow : Window
 
     private void SavePlacement()
     {
-        _placementStore.Save(new PetWindowPlacement(Left, Top, _scale, _walkingEnabled));
+        _placementStore.Save(new PetWindowPlacement(
+            Left,
+            Top,
+            _scale,
+            _walkingEnabled,
+            _actionFrequencySettings.RandomActionFrequency,
+            _actionFrequencySettings.WalkSpeedMultiplier,
+            _actionFrequencySettings.WanderFrequency));
     }
 
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
@@ -1103,7 +1138,7 @@ public sealed class PetWindow : Window
         _lastWalkLaneTop = GetWalkLaneTop(bounds);
         Top = _lastWalkLaneTop;
 
-        var step = WalkSpeedDipPerSecond * elapsed.TotalSeconds *
+        var step = _actionFrequencySettings.ScaleWalkSpeed(WalkSpeedDipPerSecond) * elapsed.TotalSeconds *
             (_walkDirection == PetSpriteCrawlDirection.Right ? 1 : -1);
         var minLeft = bounds.Left;
         var maxLeft = Math.Max(bounds.Left, bounds.Right - Width);
@@ -1124,7 +1159,7 @@ public sealed class PetWindow : Window
         }
 
         _walkedSincePause += elapsed;
-        if (_walkedSincePause >= WalkDurationBeforePause)
+        if (_walkedSincePause >= _actionFrequencySettings.ScaleWanderInterval(WalkDurationBeforePause))
         {
             _walkPauseUntilUtc = now + WalkRestPause;
             _walkedSincePause = TimeSpan.Zero;
@@ -1443,6 +1478,7 @@ public sealed class PetWindow : Window
                     pet.IsBuiltIn
                 },
                 Sprite = _spriteAnimator.CurrentFrame,
+                ActionFrequency = _actionFrequencySettings,
                 Walking = new
                 {
                     Enabled = _walkingEnabled,

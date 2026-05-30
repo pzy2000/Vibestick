@@ -1,13 +1,29 @@
 using System.Text.Json;
 using System.IO;
+using System.Text.Json.Serialization;
 
 namespace Vibestick.Gui;
 
 public sealed record PetWindowPlacement(
-    double Left,
-    double Top,
+    double? Left = null,
+    double? Top = null,
     double? Scale = null,
-    bool? WalkingEnabled = null);
+    bool? WalkingEnabled = null,
+    double? RandomActionFrequency = null,
+    double? WalkSpeedMultiplier = null,
+    double? WanderFrequency = null)
+{
+    [JsonIgnore]
+    public bool HasWindowPosition => Left is not null && Top is not null;
+
+    [JsonIgnore]
+    public PetActionFrequencySettings ActionFrequencySettings => new PetActionFrequencySettings()
+    {
+        RandomActionFrequency = RandomActionFrequency ?? PetActionFrequencySettings.Default.RandomActionFrequency,
+        WalkSpeedMultiplier = WalkSpeedMultiplier ?? PetActionFrequencySettings.Default.WalkSpeedMultiplier,
+        WanderFrequency = WanderFrequency ?? PetActionFrequencySettings.Default.WanderFrequency
+    }.Clamped();
+}
 
 public sealed class PetWindowStateStore
 {
@@ -47,6 +63,23 @@ public sealed class PetWindowStateStore
         }
 
         File.WriteAllText(Path, JsonSerializer.Serialize(placement, JsonOptions));
+    }
+
+    public PetActionFrequencySettings LoadActionFrequencySettings()
+    {
+        return Load()?.ActionFrequencySettings ?? PetActionFrequencySettings.Default;
+    }
+
+    public void SaveActionFrequencySettings(PetActionFrequencySettings settings)
+    {
+        var clamped = settings.Clamped();
+        var placement = Load() ?? new PetWindowPlacement();
+        Save(placement with
+        {
+            RandomActionFrequency = clamped.RandomActionFrequency,
+            WalkSpeedMultiplier = clamped.WalkSpeedMultiplier,
+            WanderFrequency = clamped.WanderFrequency
+        });
     }
 
     public static string GetDefaultPath()

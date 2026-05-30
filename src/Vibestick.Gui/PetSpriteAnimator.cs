@@ -55,6 +55,7 @@ public sealed class PetSpriteAnimator
     private PetAnimationClip _activeClip;
     private PetAnimationClip? _randomActionClip;
     private DateTimeOffset _nextRandomActionAtUtc;
+    private PetActionFrequencySettings _actionFrequencySettings = PetActionFrequencySettings.Default;
     private int _frameIndex;
 
     public PetSpriteAnimator(Image image, TextBlock fallback)
@@ -64,7 +65,7 @@ public sealed class PetSpriteAnimator
         _activeClip = Clip("seated_blink");
         SetSpritesheet(Path.Combine(AppContext.BaseDirectory, "Assets", "PetSprites", "golden-shaded-cat-spritesheet.cleaned.png"));
         _nextRandomActionAtUtc = DateTimeOffset.UtcNow +
-            (_useSeededFastSchedule ? TimeSpan.FromMilliseconds(900) : DefaultRandomDelay);
+            (_useSeededFastSchedule ? TimeSpan.FromMilliseconds(900) : _actionFrequencySettings.ScaleRandomActionDelay(DefaultRandomDelay));
         var transformGroup = new TransformGroup();
         transformGroup.Children.Add(_directionTransform);
         transformGroup.Children.Add(_motionTransform);
@@ -78,6 +79,20 @@ public sealed class PetSpriteAnimator
     public TimeSpan CurrentFrameInterval => _activeClip.FrameInterval;
 
     public int CatalogFrameCount => CatalogFrameTotal;
+
+    public PetActionFrequencySettings ActionFrequencySettings => _actionFrequencySettings;
+
+    public void SetActionFrequencySettings(PetActionFrequencySettings settings)
+    {
+        var clamped = settings.Clamped();
+        if (_actionFrequencySettings == clamped)
+        {
+            return;
+        }
+
+        _actionFrequencySettings = clamped;
+        ScheduleNextRandomAction(DateTimeOffset.UtcNow);
+    }
 
     public void SetSpritesheet(string path)
     {
@@ -272,7 +287,8 @@ public sealed class PetSpriteAnimator
 
         var minSeconds = _mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling ? 8 : 6;
         var rangeSeconds = _mood is PetMood.Running or PetMood.Reasoning or PetMood.ToolCalling ? 10 : 8;
-        _nextRandomActionAtUtc = now + TimeSpan.FromSeconds(minSeconds + _random.NextDouble() * rangeSeconds);
+        var delay = TimeSpan.FromSeconds(minSeconds + _random.NextDouble() * rangeSeconds);
+        _nextRandomActionAtUtc = now + _actionFrequencySettings.ScaleRandomActionDelay(delay);
     }
 
     private static bool CanUseRandomActions(PetMood mood)
