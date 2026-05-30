@@ -571,7 +571,7 @@ public sealed class MainWindow : Window
         controlsColumn.Children.Add(new Border
         {
             Margin = new Thickness(0, 16, 0, 0),
-            Padding = new Thickness(14),
+            Padding = new Thickness(10),
             Background = Brushes.White,
             BorderBrush = Brush("#e1e5ee"),
             BorderThickness = new Thickness(1),
@@ -686,15 +686,6 @@ public sealed class MainWindow : Window
     private UIElement BuildPetActionFrequencyPanel()
     {
         var root = new StackPanel();
-        root.Children.Add(new TextBlock
-        {
-            Text = "Pet Action Frequency",
-            FontSize = 13,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = Brush("#172033"),
-            Margin = new Thickness(0, 0, 0, 8)
-        });
-
         AddFrequencySlider(
             root,
             _randomActionFrequencySlider,
@@ -730,7 +721,7 @@ public sealed class MainWindow : Window
         double maximum = PetActionFrequencySettings.MaxMultiplier,
         double tickFrequency = PetActionFrequencySettings.Step)
     {
-        var row = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 2) };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });

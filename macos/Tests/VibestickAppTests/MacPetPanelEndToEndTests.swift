@@ -103,8 +103,10 @@ final class MacPetPanelEndToEndTests: XCTestCase {
         panel.finishResizing()
 
         XCTAssertEqual(panel.petScale, 1.5, accuracy: 0.0001)
-        XCTAssertLessThanOrEqual(panel.frame.maxX, screen.visibleFrame.maxX + 0.5)
-        XCTAssertLessThanOrEqual(panel.frame.maxY, screen.visibleFrame.maxY + 0.5)
+        let containingVisibleFrame = NSScreen.screens
+            .map(\.visibleFrame)
+            .first { $0.insetBy(dx: -0.5, dy: -0.5).contains(panel.frame) }
+        XCTAssertNotNil(containingVisibleFrame, "Expected resized frame to fit on a visible screen: \(panel.frame)")
     }
 
     func testResetPositionKeepsSavedScale() {
