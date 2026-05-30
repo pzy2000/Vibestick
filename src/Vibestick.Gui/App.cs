@@ -719,20 +719,27 @@ public sealed class MainWindow : Window
         double maximum = PetActionFrequencySettings.MaxMultiplier,
         double tickFrequency = PetActionFrequencySettings.Step)
     {
-        var row = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
-        var header = new DockPanel { LastChildFill = true };
-        valueText.FontSize = 11;
-        valueText.FontFamily = new FontFamily("Consolas");
-        valueText.Foreground = Brush("#4b5563");
-        DockPanel.SetDock(valueText, Dock.Right);
-        header.Children.Add(valueText);
-        header.Children.Add(new TextBlock
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
+
+        var labelText = new TextBlock
         {
             Text = label,
             FontSize = 11,
-            Foreground = Brush("#4b5563")
-        });
-        row.Children.Add(header);
+            Foreground = Brush("#4b5563"),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        row.Children.Add(labelText);
+
+        valueText.FontSize = 11;
+        valueText.FontFamily = new FontFamily("Consolas");
+        valueText.Foreground = Brush("#4b5563");
+        valueText.TextAlignment = TextAlignment.Right;
+        valueText.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(valueText, 2);
+        row.Children.Add(valueText);
 
         slider.Minimum = minimum;
         slider.Maximum = maximum;
@@ -742,6 +749,8 @@ public sealed class MainWindow : Window
         slider.IsSnapToTickEnabled = true;
         slider.AutoToolTipPlacement = AutoToolTipPlacement.TopLeft;
         slider.Value = value;
+        slider.Margin = new Thickness(8, 0, 8, 0);
+        Grid.SetColumn(slider, 1);
         slider.ValueChanged += (_, _) => HandleActionFrequencySliderChanged();
         row.Children.Add(slider);
         root.Children.Add(row);

@@ -2104,8 +2104,8 @@ final class PetPanel: NSPanel, NSMenuDelegate {
 
     func resize(byDragDelta delta: NSPoint) {
         let nextScale = MacPetResizeGeometry.scale(startScale: resizeStartScale, dragDelta: delta)
-        applyScale(nextScale)
-        clampCurrentPosition()
+        applyScale(nextScale, preferRetainedScreen: false)
+        clampCurrentPosition(preferRetainedScreen: false)
         updateSpritePresentation(at: Date(), force: true)
     }
 
@@ -2271,18 +2271,19 @@ final class PetPanel: NSPanel, NSMenuDelegate {
         Double.random(in: 0.12...0.45)
     }
 
-    private func clampCurrentPosition() {
-        setFrameOrigin(clampedOrigin(frame.origin))
+    private func clampCurrentPosition(preferRetainedScreen: Bool = true) {
+        setFrameOrigin(clampedOrigin(frame.origin, preferRetainedScreen: preferRetainedScreen))
     }
 
-    private func applyScale(_ scale: CGFloat) {
+    private func applyScale(_ scale: CGFloat, preferRetainedScreen: Bool = true) {
         let nextScale = MacPetResizeGeometry.clampedScale(scale)
         panelState.scale = nextScale
         var nextFrame = frame
         nextFrame.size = MacPetResizeGeometry.scaledSize(
             baseSize: MacPetResizeGeometry.basePanelSize,
             scale: nextScale)
-        setFrame(Self.clampedFrame(nextFrame, preferredScreenIdentifier: retainedScreenIdentifier), display: true)
+        let preferredScreenIdentifier = preferRetainedScreen ? retainedScreenIdentifier : nil
+        setFrame(Self.clampedFrame(nextFrame, preferredScreenIdentifier: preferredScreenIdentifier), display: true)
     }
 
     private func clampedOrigin(_ origin: NSPoint, preferRetainedScreen: Bool = true) -> NSPoint {
