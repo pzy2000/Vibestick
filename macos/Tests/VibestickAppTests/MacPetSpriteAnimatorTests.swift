@@ -109,7 +109,11 @@ final class MacPetSpriteAnimatorTests: XCTestCase {
         let pet = PetStateResolver().resolve(status: defaultPetStatus(), coders: [])
         let activity = activityObservation(category: AppActivityCategory.study)
 
-        let display = VibestickViewModel.petDisplayState(pet: pet, coders: [], activity: activity)
+        let display = VibestickViewModel.petDisplayState(
+            pet: pet,
+            coders: [],
+            activity: activity,
+            text: LocalizedText(language: .zh))
 
         XCTAssertEqual(display.mood, "happy")
         XCTAssertEqual(display.title, "学习中")
