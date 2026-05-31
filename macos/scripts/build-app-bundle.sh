@@ -66,6 +66,7 @@ clear_app_xattrs() {
       xattr -rd com.apple.ResourceFork "$bundle" 2>/dev/null || true
       find "$bundle" -exec sh -c '
         for path do
+          xattr -c "$path" 2>/dev/null || true
           xattr -d "com.apple.fileprovider.fpfs#P" "$path" 2>/dev/null || true
           xattr -d com.apple.FinderInfo "$path" 2>/dev/null || true
           xattr -d com.apple.ResourceFork "$path" 2>/dev/null || true
@@ -81,11 +82,29 @@ clear_app_xattrs() {
 
 clear_app_xattrs "$staged_app"
 
+dev_sign_identity() {
+  if [[ -n "${VIBESTICK_DEV_CODE_SIGN_IDENTITY:-}" ]]; then
+    echo "$VIBESTICK_DEV_CODE_SIGN_IDENTITY"
+    return
+  fi
+
+  if command -v security >/dev/null 2>&1; then
+    security find-identity -p codesigning -v 2>/dev/null \
+      | awk -F '"' '/"Apple Development: / { print $2; exit }' \
+      || true
+  fi
+}
+
 if [[ "$mode" == "dev" ]]; then
-  codesign --force --deep --sign - "$staged_app"
+  identity="$(dev_sign_identity)"
+  if [[ -z "$identity" ]]; then
+    identity="-"
+  fi
+
+  codesign --force --deep --sign "$identity" "$staged_app"
   clear_app_xattrs "$staged_app"
   xattr -c "$staged_ctl" 2>/dev/null || true
-  codesign --force --sign - "$staged_ctl"
+  codesign --force --sign "$identity" "$staged_ctl"
 else
   : "${DEVELOPER_ID_APPLICATION:?Set DEVELOPER_ID_APPLICATION for release signing.}"
   codesign --force --options runtime --timestamp --deep --sign "$DEVELOPER_ID_APPLICATION" "$staged_app"

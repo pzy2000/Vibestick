@@ -1053,52 +1053,108 @@ internal static class Program
         try
         {
             var guiDll = await PublishGuiForSmokeAsync(repoRoot, publishDirectory).ConfigureAwait(false);
-            var result = await RunProcessAsync(
-                    GetDotnetPath(),
-                    $"\"{guiDll}\" --panel --smoke --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{Path.Combine(directory, "placement.json")}\" --panel-layout-snapshot \"{layoutPath}\"",
+            await AssertGuiPanelLayoutAsync(
                     repoRoot,
-                    TimeSpan.FromSeconds(20))
+                    guiDll,
+                    directory,
+                    layoutPath,
+                    "en",
+                    new[]
+                    {
+                        "Refresh Status",
+                        "Run Doctor",
+                        "Mode ON",
+                        "Mode HYPER",
+                        "Stop HYPER Guard",
+                        "OFF / Revert",
+                        "Import Pet",
+                        "Export Current",
+                        "Delete Custom Pet"
+                    },
+                    new[] { "Random actions", "Walking speed", "Wander / pause" })
                 .ConfigureAwait(false);
-            AssertEqual(0, result.ExitCode);
 
-            if (!File.Exists(layoutPath))
-            {
-                throw new InvalidOperationException("Expected control panel layout snapshot.");
-            }
-
-            var layout = JsonNode.Parse(await File.ReadAllTextAsync(layoutPath).ConfigureAwait(false)) ??
-                throw new InvalidOperationException("Expected control panel layout JSON.");
-            var buttons = layout["Buttons"]?.AsArray() ??
-                throw new InvalidOperationException("Expected control panel button layout entries.");
-            AssertEqual(9, buttons.Count);
-            var sliders = layout["Sliders"]?.AsArray() ??
-                throw new InvalidOperationException("Expected control panel slider layout entries.");
-            AssertEqual(3, sliders.Count);
-
-            foreach (var action in new[]
-            {
-                "Refresh Status",
-                "Run Doctor",
-                "Mode ON",
-                "Mode HYPER",
-                "Stop HYPER Guard",
-                "OFF / Revert",
-                "Import Pet",
-                "Export Current",
-                "Delete Custom Pet"
-            })
-            {
-                AssertPanelActionVisible(buttons, action);
-            }
-
-            foreach (var slider in new[] { "Random actions", "Walking speed", "Wander / pause" })
-            {
-                AssertPanelSliderVisible(sliders, slider);
-            }
+            var zhLayoutPath = Path.Combine(directory, "panel-layout-zh.json");
+            await AssertGuiPanelLayoutAsync(
+                    repoRoot,
+                    guiDll,
+                    directory,
+                    zhLayoutPath,
+                    "zh",
+                    new[]
+                    {
+                        "刷新状态",
+                        "运行诊断",
+                        "模式 ON",
+                        "Mode HYPER",
+                        "停止 HYPER 守护",
+                        "关闭 / 恢复",
+                        "导入宠物",
+                        "导出当前",
+                        "删除自定义宠物"
+                    },
+                    new[] { "随机动作", "行走速度", "游荡 / 停顿" })
+                .ConfigureAwait(false);
         }
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task AssertGuiPanelLayoutAsync(
+        string repoRoot,
+        string guiDll,
+        string directory,
+        string layoutPath,
+        string languagePreference,
+        IReadOnlyList<string> expectedButtons,
+        IReadOnlyList<string> expectedSliders)
+    {
+        var placementPath = Path.Combine(directory, $"placement-{languagePreference}.json");
+        await File.WriteAllTextAsync(
+                placementPath,
+                $$"""
+                {
+                  "LanguagePreference": "{{languagePreference}}"
+                }
+                """)
+            .ConfigureAwait(false);
+
+        var result = await RunProcessAsync(
+                GetDotnetPath(),
+                $"\"{guiDll}\" --panel --smoke --no-codex-monitor --status-dir \"{directory}\" --placement-path \"{placementPath}\" --panel-layout-snapshot \"{layoutPath}\"",
+                repoRoot,
+                TimeSpan.FromSeconds(20))
+            .ConfigureAwait(false);
+        AssertEqual(0, result.ExitCode);
+
+        if (!File.Exists(layoutPath))
+        {
+            throw new InvalidOperationException("Expected control panel layout snapshot.");
+        }
+
+        var layout = JsonNode.Parse(await File.ReadAllTextAsync(layoutPath).ConfigureAwait(false)) ??
+            throw new InvalidOperationException("Expected control panel layout JSON.");
+        AssertEqual(languagePreference, layout["LanguagePreference"]?.GetValue<string>());
+        var languageOptions = layout["LanguageOptions"]?.AsArray() ??
+            throw new InvalidOperationException("Expected language options in control panel layout.");
+        AssertEqual(3, languageOptions.Count);
+        var buttons = layout["Buttons"]?.AsArray() ??
+            throw new InvalidOperationException("Expected control panel button layout entries.");
+        AssertEqual(9, buttons.Count);
+        var sliders = layout["Sliders"]?.AsArray() ??
+            throw new InvalidOperationException("Expected control panel slider layout entries.");
+        AssertEqual(3, sliders.Count);
+
+        foreach (var action in expectedButtons)
+        {
+            AssertPanelActionVisible(buttons, action);
+        }
+
+        foreach (var slider in expectedSliders)
+        {
+            AssertPanelSliderVisible(sliders, slider);
         }
     }
 

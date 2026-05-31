@@ -152,6 +152,48 @@ public struct AppActivityRule: Codable, Equatable, Sendable {
         urlContains = try container.decodeIfPresent([String].self, forKey: .urlContains) ?? []
         titleFragments = try container.decodeIfPresent([String].self, forKey: .titleFragments) ?? []
     }
+
+    public var hasMatchers: Bool {
+        Self.hasNonEmptyValue(bundleIdentifiers)
+            || Self.hasNonEmptyValue(appNameFragments)
+            || Self.hasNonEmptyValue(urlHostSuffixes)
+            || Self.hasNonEmptyValue(urlContains)
+            || Self.hasNonEmptyValue(titleFragments)
+    }
+
+    public var normalizedForStorage: AppActivityRule {
+        AppActivityRule(
+            id: id.trimmingCharacters(in: .whitespacesAndNewlines),
+            category: category,
+            isEnabled: isEnabled,
+            bundleIdentifiers: Self.cleanValues(bundleIdentifiers),
+            appNameFragments: Self.cleanValues(appNameFragments),
+            urlHostSuffixes: Self.cleanValues(urlHostSuffixes),
+            urlContains: Self.cleanValues(urlContains),
+            titleFragments: Self.cleanValues(titleFragments))
+    }
+
+    private static func cleanValues(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var cleaned: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                continue
+            }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else {
+                continue
+            }
+            seen.insert(key)
+            cleaned.append(trimmed)
+        }
+        return cleaned
+    }
+
+    private static func hasNonEmptyValue(_ values: [String]) -> Bool {
+        values.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
 }
 
 public struct AppActivityRuleFile: Codable, Equatable, Sendable {
@@ -172,6 +214,48 @@ public struct AppActivityRuleLoadResult: Equatable, Sendable {
     }
 }
 
+public struct AppActivityRuleInventory: Equatable, Sendable {
+    public let bundledRules: [AppActivityRule]
+    public let userRules: [AppActivityRule]
+    public let effectiveRules: [AppActivityRule]
+    public let userRulesURL: URL
+    public let diagnostics: [String]
+
+    public init(
+        bundledRules: [AppActivityRule],
+        userRules: [AppActivityRule],
+        effectiveRules: [AppActivityRule],
+        userRulesURL: URL,
+        diagnostics: [String] = []
+    ) {
+        self.bundledRules = bundledRules
+        self.userRules = userRules
+        self.effectiveRules = effectiveRules
+        self.userRulesURL = userRulesURL
+        self.diagnostics = diagnostics
+    }
+}
+
+public enum AppActivityRuleStoreError: Error, Equatable, LocalizedError, Sendable {
+    case emptyRuleId
+    case duplicateRuleIds([String])
+    case missingMatchers(String)
+    case bundledRuleNotFound(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyRuleId:
+            return "规则 id 不能为空。"
+        case .duplicateRuleIds(let ids):
+            return "规则 id 不能重复：\(ids.joined(separator: ", "))。"
+        case .missingMatchers(let id):
+            return "规则 \(id) 至少需要一个匹配项。"
+        case .bundledRuleNotFound(let id):
+            return "没有找到内置规则：\(id)。"
+        }
+    }
+}
+
 public struct AppActivityRuleStore: Sendable {
     public static let userRulesFileName = "app-activity-rules.json"
 
@@ -187,21 +271,114 @@ public struct AppActivityRuleStore: Sendable {
     }
 
     public func loadRules() -> AppActivityRuleLoadResult {
+        let inventory = loadInventory()
+        return AppActivityRuleLoadResult(rules: inventory.effectiveRules, diagnostics: inventory.diagnostics)
+    }
+
+    public func loadInventory() -> AppActivityRuleInventory {
         var diagnostics: [String] = []
-        var rules = bundledRulesOverride ?? Self.loadBundledRules(diagnostics: &diagnostics)
+        let bundledRules = bundledRulesOverride ?? Self.readBundledRules(diagnostics: &diagnostics)
+        var userRules: [AppActivityRule] = []
 
-        guard FileManager.default.fileExists(atPath: userRulesURL.path) else {
-            return AppActivityRuleLoadResult(rules: rules, diagnostics: diagnostics)
+        if FileManager.default.fileExists(atPath: userRulesURL.path) {
+            do {
+                userRules = try Self.decodeRules(from: Data(contentsOf: userRulesURL))
+                try Self.validateUserRules(userRules)
+            } catch {
+                diagnostics.append("无法读取 App 活动规则覆盖文件：\(error.localizedDescription)")
+                userRules = []
+            }
         }
 
+        return AppActivityRuleInventory(
+            bundledRules: bundledRules,
+            userRules: userRules,
+            effectiveRules: Self.merge(defaultRules: bundledRules, userRules: userRules),
+            userRulesURL: userRulesURL,
+            diagnostics: diagnostics)
+    }
+
+    public func loadBundledRules() -> AppActivityRuleLoadResult {
+        var diagnostics: [String] = []
+        return AppActivityRuleLoadResult(
+            rules: bundledRulesOverride ?? Self.readBundledRules(diagnostics: &diagnostics),
+            diagnostics: diagnostics)
+    }
+
+    public func loadUserRules() -> AppActivityRuleLoadResult {
         do {
-            let userRules = try Self.decodeRules(from: Data(contentsOf: userRulesURL))
-            rules = Self.merge(defaultRules: rules, userRules: userRules)
+            let rules = try readUserRulesForEditing()
+            return AppActivityRuleLoadResult(rules: rules)
         } catch {
-            diagnostics.append("无法读取 App 活动规则覆盖文件：\(error.localizedDescription)")
+            return AppActivityRuleLoadResult(
+                rules: [],
+                diagnostics: ["无法读取 App 活动规则覆盖文件：\(error.localizedDescription)"])
         }
+    }
 
-        return AppActivityRuleLoadResult(rules: rules, diagnostics: diagnostics)
+    @discardableResult
+    public func saveUserRules(_ rules: [AppActivityRule]) throws -> [AppActivityRule] {
+        let normalizedRules = rules.map(\.normalizedForStorage)
+        try Self.validateUserRules(normalizedRules)
+        try FileManager.default.createDirectory(
+            at: userRulesURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        let data = try VibestickJSON.encoder.encode(AppActivityRuleFile(rules: normalizedRules))
+        try data.write(to: userRulesURL, options: .atomic)
+        return normalizedRules
+    }
+
+    @discardableResult
+    public func upsertUserRule(_ rule: AppActivityRule) throws -> [AppActivityRule] {
+        var rules = try readUserRulesForEditing()
+        let normalizedRule = rule.normalizedForStorage
+        if let index = rules.firstIndex(where: { $0.id == normalizedRule.id }) {
+            rules[index] = normalizedRule
+        } else {
+            rules.append(normalizedRule)
+        }
+        return try saveUserRules(rules)
+    }
+
+    @discardableResult
+    public func replaceUserRule(id: String, with rule: AppActivityRule) throws -> [AppActivityRule] {
+        let normalizedId = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        var rules = try readUserRulesForEditing().filter { $0.id != normalizedId }
+        let normalizedRule = rule.normalizedForStorage
+        if let index = rules.firstIndex(where: { $0.id == normalizedRule.id }) {
+            rules[index] = normalizedRule
+        } else {
+            rules.append(normalizedRule)
+        }
+        return try saveUserRules(rules)
+    }
+
+    @discardableResult
+    public func removeUserRule(id: String) throws -> [AppActivityRule] {
+        let normalizedId = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rules = try readUserRulesForEditing().filter { $0.id != normalizedId }
+        return try saveUserRules(rules)
+    }
+
+    @discardableResult
+    public func disableBundledRule(id: String) throws -> [AppActivityRule] {
+        let normalizedId = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundledRules = loadBundledRules().rules
+        guard let bundledRule = bundledRules.first(where: { $0.id == normalizedId }) else {
+            throw AppActivityRuleStoreError.bundledRuleNotFound(normalizedId)
+        }
+        let disabledRule = AppActivityRule(
+            id: bundledRule.id,
+            category: bundledRule.category,
+            isEnabled: false)
+        return try upsertUserRule(disabledRule)
+    }
+
+    public func resetUserRules() throws {
+        guard FileManager.default.fileExists(atPath: userRulesURL.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: userRulesURL)
     }
 
     public static func decodeRules(from data: Data) throws -> [AppActivityRule] {
@@ -228,14 +405,53 @@ public struct AppActivityRuleStore: Sendable {
         return merged
     }
 
-    private static func loadBundledRules(diagnostics: inout [String]) -> [AppActivityRule] {
+    public static func validateUserRules(_ rules: [AppActivityRule]) throws {
+        try validate(rules: rules, requireMatchersForDisabledRules: false)
+    }
+
+    public static func validateEffectiveRules(_ rules: [AppActivityRule]) throws {
+        try validate(rules: rules, requireMatchersForDisabledRules: true)
+    }
+
+    private func readUserRulesForEditing() throws -> [AppActivityRule] {
+        guard FileManager.default.fileExists(atPath: userRulesURL.path) else {
+            return []
+        }
+        let rules = try Self.decodeRules(from: Data(contentsOf: userRulesURL))
+        try Self.validateUserRules(rules)
+        return rules
+    }
+
+    private static func validate(rules: [AppActivityRule], requireMatchersForDisabledRules: Bool) throws {
+        let normalizedRules = rules.map(\.normalizedForStorage)
+        var seen = Set<String>()
+        var duplicateIds: [String] = []
+        for rule in normalizedRules {
+            guard !rule.id.isEmpty else {
+                throw AppActivityRuleStoreError.emptyRuleId
+            }
+            if !seen.insert(rule.id).inserted {
+                duplicateIds.append(rule.id)
+            }
+            if (rule.isEnabled || requireMatchersForDisabledRules) && !rule.hasMatchers {
+                throw AppActivityRuleStoreError.missingMatchers(rule.id)
+            }
+        }
+        if !duplicateIds.isEmpty {
+            throw AppActivityRuleStoreError.duplicateRuleIds(Array(Set(duplicateIds)).sorted())
+        }
+    }
+
+    private static func readBundledRules(diagnostics: inout [String]) -> [AppActivityRule] {
         guard let url = Bundle.module.url(forResource: "AppActivityRules", withExtension: "json") else {
             diagnostics.append("内置 App 活动规则文件缺失。")
             return []
         }
 
         do {
-            return try decodeRules(from: Data(contentsOf: url))
+            let rules = try decodeRules(from: Data(contentsOf: url))
+            try validateEffectiveRules(rules)
+            return rules
         } catch {
             diagnostics.append("内置 App 活动规则文件无法解析：\(error.localizedDescription)")
             return []

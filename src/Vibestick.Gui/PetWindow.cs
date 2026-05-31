@@ -78,7 +78,13 @@ public sealed class PetWindow : Window
     private readonly DispatcherTimer _frameTimer;
     private readonly DispatcherTimer _walkTimer;
     private readonly DispatcherTimer _walkResumeTimer;
+    private readonly MenuItem _openControlPanelMenuItem = new();
+    private readonly MenuItem _refreshMenuItem = new();
+    private readonly MenuItem _importPetMenuItem = new();
+    private readonly MenuItem _exportPetMenuItem = new();
     private readonly MenuItem _walkingToggleMenuItem = new();
+    private readonly MenuItem _hidePetMenuItem = new();
+    private readonly MenuItem _exitMenuItem = new();
     private readonly System.IO.FileSystemWatcher? _statusWatcher;
     private readonly StackPanel _taskHost = new();
     private readonly StackPanel _taskCardsPanel = new();
@@ -115,6 +121,7 @@ public sealed class PetWindow : Window
     private bool _walkingEnabled = true;
     private bool _walkTemporarilyPaused;
     private PetActionFrequencySettings _actionFrequencySettings = PetActionFrequencySettings.Default;
+    private GuiText Text => GuiText.For(_placementStore.LoadLanguagePreference().Resolve());
     private PetSpriteCrawlDirection _walkDirection = PetSpriteCrawlDirection.Left;
     private DateTimeOffset? _lastWalkTickUtc;
     private DateTimeOffset? _walkPauseUntilUtc;
@@ -143,7 +150,7 @@ public sealed class PetWindow : Window
         _exitApplication = exitApplication;
         _placementStore = placementStore ?? new PetWindowStateStore();
 
-        Title = "Vibestick Pet - Idle";
+        Title = Text.Language == GuiLanguage.Zh ? "Vibestick 桌宠 - idle" : "Vibestick Pet - Idle";
         ApplyScale(DefaultScale);
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -305,6 +312,21 @@ public sealed class PetWindow : Window
         WriteRuntimeSnapshotIfReady(DateTimeOffset.UtcNow, force: true);
     }
 
+    public void RefreshLanguageText()
+    {
+        _openControlPanelMenuItem.Header = Text.OpenControlPanel;
+        _refreshMenuItem.Header = Text.RefreshPet;
+        _importPetMenuItem.Header = Text.ImportPetMenu;
+        _exportPetMenuItem.Header = Text.ExportPetMenu;
+        _hidePetMenuItem.Header = Text.HidePet;
+        _exitMenuItem.Header = Text.ExitVibestick;
+        UpdateWalkingMenuText();
+        if (_currentState is not null)
+        {
+            Render(_currentState);
+        }
+    }
+
     private UIElement BuildLayout(Image sprite, TextBlock fallback)
     {
         var root = new Grid
@@ -409,34 +431,34 @@ public sealed class PetWindow : Window
     private ContextMenu BuildContextMenu()
     {
         var menu = new ContextMenu();
-        var open = new MenuItem { Header = "Open Control Panel" };
-        open.Click += (_, _) => _openControlPanel();
-        menu.Items.Add(open);
+        _openControlPanelMenuItem.Header = Text.OpenControlPanel;
+        _openControlPanelMenuItem.Click += (_, _) => _openControlPanel();
+        menu.Items.Add(_openControlPanelMenuItem);
 
-        var refresh = new MenuItem { Header = "Refresh Pet" };
-        refresh.Click += async (_, _) => await RefreshNowAsync().ConfigureAwait(true);
-        menu.Items.Add(refresh);
+        _refreshMenuItem.Header = Text.RefreshPet;
+        _refreshMenuItem.Click += async (_, _) => await RefreshNowAsync().ConfigureAwait(true);
+        menu.Items.Add(_refreshMenuItem);
 
-        var importPet = new MenuItem { Header = "Import Pet..." };
-        importPet.Click += (_, _) => _importPet();
-        menu.Items.Add(importPet);
+        _importPetMenuItem.Header = Text.ImportPetMenu;
+        _importPetMenuItem.Click += (_, _) => _importPet();
+        menu.Items.Add(_importPetMenuItem);
 
-        var exportPet = new MenuItem { Header = "Export Current Pet..." };
-        exportPet.Click += (_, _) => _exportPet();
-        menu.Items.Add(exportPet);
+        _exportPetMenuItem.Header = Text.ExportPetMenu;
+        _exportPetMenuItem.Click += (_, _) => _exportPet();
+        menu.Items.Add(_exportPetMenuItem);
 
         _walkingToggleMenuItem.Click += (_, _) => ToggleWalking();
         UpdateWalkingMenuText();
         menu.Items.Add(_walkingToggleMenuItem);
 
-        var hide = new MenuItem { Header = "Hide Pet" };
-        hide.Click += (_, _) => _hidePet();
-        menu.Items.Add(hide);
+        _hidePetMenuItem.Header = Text.HidePet;
+        _hidePetMenuItem.Click += (_, _) => _hidePet();
+        menu.Items.Add(_hidePetMenuItem);
 
         menu.Items.Add(new Separator());
-        var exit = new MenuItem { Header = "Exit Vibestick" };
-        exit.Click += (_, _) => _exitApplication();
-        menu.Items.Add(exit);
+        _exitMenuItem.Header = Text.ExitVibestick;
+        _exitMenuItem.Click += (_, _) => _exitApplication();
+        menu.Items.Add(_exitMenuItem);
         return menu;
     }
 
@@ -486,7 +508,7 @@ public sealed class PetWindow : Window
         var pet = _services.PetLibrary.GetCurrentPet();
         _spriteAnimator.SetSpritesheet(pet.SpritesheetPath);
         _spriteAnimator.SetMood(state.Mood);
-        Title = $"Vibestick Pet - {state.Mood}";
+        Title = Text.Language == GuiLanguage.Zh ? $"Vibestick 桌宠 - {state.Mood}" : $"Vibestick Pet - {state.Mood}";
         SetNativeTitle(Title);
         AutomationProperties.SetName(this, Title);
         _titleText.Text = state.Title;
@@ -946,13 +968,13 @@ public sealed class PetWindow : Window
     private void SavePlacement()
     {
         _placementStore.Save(new PetWindowPlacement(
-            Left,
-            Top,
-            _scale,
-            _walkingEnabled,
-            _actionFrequencySettings.RandomActionFrequency,
-            _actionFrequencySettings.WalkSpeedMultiplier,
-            _actionFrequencySettings.WanderFrequency));
+            Left: Left,
+            Top: Top,
+            Scale: _scale,
+            WalkingEnabled: _walkingEnabled,
+            RandomActionFrequency: _actionFrequencySettings.RandomActionFrequency,
+            WalkSpeedMultiplier: _actionFrequencySettings.WalkSpeedMultiplier,
+            WanderFrequency: _actionFrequencySettings.WanderFrequency));
     }
 
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
@@ -1229,7 +1251,7 @@ public sealed class PetWindow : Window
 
     private void UpdateWalkingMenuText()
     {
-        _walkingToggleMenuItem.Header = _walkingEnabled ? "Pause Walking" : "Resume Walking";
+        _walkingToggleMenuItem.Header = _walkingEnabled ? Text.PauseWalking : Text.ResumeWalking;
     }
 
     private void SyncWalkingAnimation()

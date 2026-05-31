@@ -79,6 +79,105 @@ final class AppActivityTests: XCTestCase {
         XCTAssertTrue(merged.contains { $0.id == "custom-study" })
     }
 
+    func testRuleStoreInventorySeparatesBundledUserAndEffectiveRules() throws {
+        let store = makeTemporaryRuleStore(bundledRules: [
+            AppActivityRule(
+                id: "default-study",
+                category: .study,
+                appNameFragments: ["Codex"])
+        ])
+        try store.saveUserRules([
+            AppActivityRule(
+                id: "custom-distraction",
+                category: .distraction,
+                urlHostSuffixes: ["video.example"])
+        ])
+
+        let inventory = store.loadInventory()
+
+        XCTAssertEqual(inventory.bundledRules.map(\.id), ["default-study"])
+        XCTAssertEqual(inventory.userRules.map(\.id), ["custom-distraction"])
+        XCTAssertEqual(Set(inventory.effectiveRules.map(\.id)), ["default-study", "custom-distraction"])
+        XCTAssertTrue(inventory.diagnostics.isEmpty)
+    }
+
+    func testRuleStoreCanDisableRestoreAndEditBundledRulesAsUserOverrides() throws {
+        let store = makeTemporaryRuleStore(bundledRules: [
+            AppActivityRule(
+                id: "default-study",
+                category: .study,
+                appNameFragments: ["Codex"])
+        ])
+
+        try store.disableBundledRule(id: "default-study")
+        XCTAssertFalse(store.loadInventory().effectiveRules.contains { $0.id == "default-study" })
+        XCTAssertEqual(store.loadInventory().userRules.first?.isEnabled, false)
+
+        try store.upsertUserRule(AppActivityRule(
+            id: "default-study",
+            category: .distraction,
+            appNameFragments: ["Codex"]))
+        let edited = try XCTUnwrap(store.loadInventory().effectiveRules.first { $0.id == "default-study" })
+        XCTAssertEqual(edited.category, .distraction)
+
+        try store.removeUserRule(id: "default-study")
+        let restored = try XCTUnwrap(store.loadInventory().effectiveRules.first { $0.id == "default-study" })
+        XCTAssertEqual(restored.category, .study)
+    }
+
+    func testRuleStoreCanAddEditAndDeleteCustomRules() throws {
+        let store = makeTemporaryRuleStore(bundledRules: [])
+
+        try store.upsertUserRule(AppActivityRule(
+            id: "custom-study",
+            category: .study,
+            bundleIdentifiers: ["com.example.Focus"]))
+        XCTAssertEqual(store.loadInventory().effectiveRules.first?.category, .study)
+
+        try store.replaceUserRule(
+            id: "custom-study",
+            with: AppActivityRule(
+                id: "custom-focus",
+                category: .neutral,
+                appNameFragments: ["Focus"]))
+        XCTAssertNil(store.loadInventory().userRules.first { $0.id == "custom-study" })
+        XCTAssertEqual(store.loadInventory().userRules.first?.id, "custom-focus")
+        XCTAssertEqual(store.loadInventory().effectiveRules.first?.category, .neutral)
+
+        try store.removeUserRule(id: "custom-focus")
+        XCTAssertTrue(store.loadInventory().userRules.isEmpty)
+    }
+
+    func testRuleStoreValidationRejectsDuplicateIdsAndMissingMatchers() {
+        XCTAssertThrowsError(try AppActivityRuleStore.validateUserRules([
+            AppActivityRule(id: "dup", category: .study, appNameFragments: ["A"]),
+            AppActivityRule(id: "dup", category: .study, appNameFragments: ["B"])
+        ])) { error in
+            XCTAssertEqual(error as? AppActivityRuleStoreError, .duplicateRuleIds(["dup"]))
+        }
+
+        XCTAssertThrowsError(try AppActivityRuleStore.validateUserRules([
+            AppActivityRule(id: "empty-matchers", category: .study)
+        ])) { error in
+            XCTAssertEqual(error as? AppActivityRuleStoreError, .missingMatchers("empty-matchers"))
+        }
+    }
+
+    func testRuleStoreInvalidUserJSONReportsDiagnosticAndKeepsBundledRules() throws {
+        let store = makeTemporaryRuleStore(bundledRules: [
+            AppActivityRule(id: "default-study", category: .study, appNameFragments: ["Codex"])
+        ])
+        try FileManager.default.createDirectory(
+            at: store.userRulesURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("{ invalid".utf8).write(to: store.userRulesURL)
+
+        let inventory = store.loadInventory()
+
+        XCTAssertEqual(inventory.effectiveRules.map(\.id), ["default-study"])
+        XCTAssertTrue(inventory.diagnostics.contains { $0.contains("无法读取 App 活动规则覆盖文件") })
+    }
+
     func testDecodeRulesSupportsSnakeCaseRuleFile() throws {
         let data = Data("""
         {
@@ -166,6 +265,14 @@ final class AppActivityTests: XCTestCase {
         XCTAssertEqual(staleSelf.category, .neutral)
         XCTAssertEqual(staleSelf.appName, "Vibestick")
     }
+}
+
+private func makeTemporaryRuleStore(bundledRules: [AppActivityRule]) -> AppActivityRuleStore {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("vibestick-activity-rules-\(UUID().uuidString)", isDirectory: true)
+    return AppActivityRuleStore(
+        userRulesURL: directory.appendingPathComponent(AppActivityRuleStore.userRulesFileName),
+        bundledRulesOverride: bundledRules)
 }
 
 private final class StaticApplicationSource: ForegroundApplicationSnapshotSourcing, @unchecked Sendable {

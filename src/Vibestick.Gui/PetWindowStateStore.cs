@@ -9,6 +9,7 @@ public sealed record PetWindowPlacement(
     double? Top = null,
     double? Scale = null,
     bool? WalkingEnabled = null,
+    string? LanguagePreference = null,
     double? RandomActionFrequency = null,
     double? WalkSpeedMultiplier = null,
     double? WanderFrequency = null)
@@ -68,6 +69,20 @@ public sealed class PetWindowStateStore
     public PetActionFrequencySettings LoadActionFrequencySettings()
     {
         return Load()?.ActionFrequencySettings ?? PetActionFrequencySettings.Default;
+    }
+
+    public GuiLanguagePreference LoadLanguagePreference()
+    {
+        return GuiLanguagePreferenceExtensions.ParseLanguagePreference(Load()?.LanguagePreference);
+    }
+
+    public void SaveLanguagePreference(GuiLanguagePreference preference)
+    {
+        var placement = Load() ?? new PetWindowPlacement();
+        Save(placement with
+        {
+            LanguagePreference = preference.ToStorageValue()
+        });
     }
 
     public void SaveActionFrequencySettings(PetActionFrequencySettings settings)
